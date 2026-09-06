@@ -103,6 +103,58 @@
         "file": "glossary.md",
         "title": "Глоссарий"
       }
+    ],
+    "05-evals-observability": [
+      {
+        "file": "book.md",
+        "title": "День 5: Evals и наблюдаемость"
+      },
+      {
+        "file": "chapter-01.md",
+        "title": "Глава 1. Суть: измерять, а не верить"
+      },
+      {
+        "file": "chapter-02.md",
+        "title": "Глава 2. Лаба: Langfuse, RAGAS и гейт качества"
+      },
+      {
+        "file": "chapter-03.md",
+        "title": "Глава 3. Вопросы собеседования"
+      },
+      {
+        "file": "chapter-04.md",
+        "title": "Глава 4. Что показать работодателю"
+      },
+      {
+        "file": "glossary.md",
+        "title": "Глоссарий"
+      }
+    ],
+    "06-models-serving-ru-security": [
+      {
+        "file": "book.md",
+        "title": "День 6: Модели, инференс, РФ-реалии и безопасность"
+      },
+      {
+        "file": "chapter-01.md",
+        "title": "Глава 1. Суть: железо, движки, дообучение, РФ и угрозы"
+      },
+      {
+        "file": "chapter-02.md",
+        "title": "Глава 2. Лаба: замеры инференса и red team своего продукта"
+      },
+      {
+        "file": "chapter-03.md",
+        "title": "Глава 3. Вопросы собеседования"
+      },
+      {
+        "file": "chapter-04.md",
+        "title": "Глава 4. Что показать работодателю"
+      },
+      {
+        "file": "glossary.md",
+        "title": "Глоссарий"
+      }
     ]
   }
 }
