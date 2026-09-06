@@ -25,6 +25,32 @@
         "file": "glossary.md",
         "title": "Глоссарий"
       }
+    ],
+    "02-rag-deep": [
+      {
+        "file": "book.md",
+        "title": "День 2: RAG глубоко"
+      },
+      {
+        "file": "chapter-01.md",
+        "title": "Глава 1. Суть: RAG как система, которую можно измерить"
+      },
+      {
+        "file": "chapter-02.md",
+        "title": "Глава 2. Лаба: golden-набор и четыре ретривера"
+      },
+      {
+        "file": "chapter-03.md",
+        "title": "Глава 3. Вопросы собеседования"
+      },
+      {
+        "file": "chapter-04.md",
+        "title": "Глава 4. Что показать работодателю"
+      },
+      {
+        "file": "glossary.md",
+        "title": "Глоссарий"
+      }
     ]
   }
 }
