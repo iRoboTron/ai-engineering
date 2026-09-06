@@ -51,6 +51,32 @@
         "file": "glossary.md",
         "title": "Глоссарий"
       }
+    ],
+    "03-vector-stores-and-ingestion": [
+      {
+        "file": "book.md",
+        "title": "День 3: Векторные хранилища и индексация"
+      },
+      {
+        "file": "chapter-01.md",
+        "title": "Глава 1. Суть: индексы, хранилища и пайплайн индексации"
+      },
+      {
+        "file": "chapter-02.md",
+        "title": "Глава 2. Лаба: pgvector рядом с Chroma"
+      },
+      {
+        "file": "chapter-03.md",
+        "title": "Глава 3. Вопросы собеседования"
+      },
+      {
+        "file": "chapter-04.md",
+        "title": "Глава 4. Что показать работодателю"
+      },
+      {
+        "file": "glossary.md",
+        "title": "Глоссарий"
+      }
     ]
   }
 }
