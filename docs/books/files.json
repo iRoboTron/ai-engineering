@@ -77,6 +77,32 @@
         "file": "glossary.md",
         "title": "Глоссарий"
       }
+    ],
+    "04-agents-langgraph-mcp": [
+      {
+        "file": "book.md",
+        "title": "День 4: Агенты, LangGraph и MCP"
+      },
+      {
+        "file": "chapter-01.md",
+        "title": "Глава 1. Суть: агенты как цикл с ограничениями"
+      },
+      {
+        "file": "chapter-02.md",
+        "title": "Глава 2. Лаба: агент на LangGraph и MCP-сервер памяти"
+      },
+      {
+        "file": "chapter-03.md",
+        "title": "Глава 3. Вопросы собеседования"
+      },
+      {
+        "file": "chapter-04.md",
+        "title": "Глава 4. Что показать работодателю"
+      },
+      {
+        "file": "glossary.md",
+        "title": "Глоссарий"
+      }
     ]
   }
 }
