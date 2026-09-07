@@ -3,7 +3,7 @@ import os
 from openai import OpenAI
 
 BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL = os.getenv("LLM_MODEL", "anthropic/claude-sonnet-4.6")
+MODEL = os.getenv("LLM_MODEL", "anthropic/claude-haiku-4.5")
 
 
 def make_client(timeout: float = 60.0) -> OpenAI:

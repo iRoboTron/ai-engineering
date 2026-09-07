@@ -61,7 +61,9 @@ cd day1-llm-basics
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."
-export LLM_MODEL="anthropic/claude-sonnet-4.6"
+# платная, но без режима рассуждений и с json_schema/tools; день 1 стоит центы.
+# Модели с суффиксом :free стоят в общей очереди (429), а «думающие» модели тратят max_tokens на скрытые рассуждения
+export LLM_MODEL="anthropic/claude-haiku-4.5"
 # прокси нужен только из РФ; убери, если запускаешь там, где OpenRouter доступен напрямую
 # socks5h, а не socks5: имена резолвит прокси, а не локальный DNS провайдера
 export HTTPS_PROXY="socks5h://192.168.0.106:1080"
@@ -101,7 +103,7 @@ import os
 from openai import OpenAI
 
 BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL = os.getenv("LLM_MODEL", "anthropic/claude-sonnet-4.6")
+MODEL = os.getenv("LLM_MODEL", "anthropic/claude-haiku-4.5")
 
 
 def make_client(timeout: float = 60.0) -> OpenAI:
@@ -417,6 +419,7 @@ print(answer.choices[0].message.content)
 - **`403` от OpenRouter** — прокси не применился. Проверь `echo $HTTPS_PROXY`, что LXC 106 жив (`curl --proxy socks5h://192.168.0.106:1080 https://openrouter.ai/api/v1/models -o /dev/null -w '%{http_code}'`), и что стоит `httpx[socks]`, иначе создание SOCKS-транспорта завершается ошибкой отсутствующей зависимости.
 - **`curl: (97) Can't complete SOCKS5 connection … (5)` или код `000`** — в `HTTPS_PROXY` стоит `socks5://` без `h`. Тогда curl резолвит `openrouter.ai` через локальный DNS, а резолвер провайдера отдаёт для этого имени другой адрес, до которого прокси в Казахстане не достучится. С `socks5h://` имя резолвит сам прокси. Python-скрипты дня этой ошибки не покажут: httpx всегда передаёт прокси имя хоста, поэтому расхождение видно только в curl.
 - **`429` с `is temporarily rate-limited upstream` и `limit_source: upstream_provider_shared_pool`** — модель с суффиксом `:free` стоит в общей очереди всех пользователей OpenRouter, и провайдер её притормаживает независимо от твоего баланса. Ретрай тут почти бесполезен. Поставь в `LLM_MODEL` дешёвую платную модель с поддержкой `tools` и `structured_outputs` (проверь оба в `supported_parameters` ответа `/models`); на день 1 хватит центов. Бесплатные модели к тому же часто не умеют json_schema, а агент дня 4 отказывается считать их стоимость.
+- **`content` пустой (`None`), `finish_reason: length` при маленьком `max_tokens`, а `usage` показывает десятки токенов** — модель рассуждает перед ответом (у DeepSeek V4 Flash и ряда других это включено по умолчанию). Скрытые токены рассуждений входят в `completion_tokens` и в счёт, в `completion_tokens_details.reasoning_tokens` видно сколько; провайдер может добавлять и скрытый системный промпт, поэтому `prompt_tokens` для одной и той же фразы отличается. Для лаб дня 1 возьми модель без рассуждений или отключи их: `extra_body={"reasoning": {"enabled": False}}` в `chat.completions.create` (расширение OpenRouter, не часть стандарта OpenAI).
 - **`402 Payment Required`** — кончился баланс OpenRouter; пополни или переключись на бесплатную модель (в id есть `:free`), понимая, что у них лимиты и очередь.
 - **`400` на `response_format`** — модель не поддерживает json_schema; скрипт сам уходит на запасной путь. Хочешь настоящий json_schema — смени модель.
 - **`ValidationError`** в шаге 4 — модель вернула JSON не по схеме или обернула в текст. Посмотри `raw`, добавь в системный промпт «без markdown» (уже есть) или сделай второй запрос с текстом ошибки — это и есть ретрай с валидацией.
