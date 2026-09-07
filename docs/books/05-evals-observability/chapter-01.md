@@ -76,7 +76,7 @@ RAGAS — библиотека метрик для RAG, где судья — м
 ## Схема
 
 ```mermaid
-flowchart LR
+flowchart TD
     G["Golden-набор\nвопрос, где ответ, эталон"] --> DS["Датасет\nLangfuse"]
     DS --> RUN["Прогон\nrag_pipeline (v1, v2)"]
     RUN --> TR["Трейсы\nretrieve → generate\nтокены, $, мс"]

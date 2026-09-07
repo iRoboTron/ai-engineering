@@ -146,7 +146,7 @@ Open-weight модели (Qwen, Llama, DeepSeek, Mistral, российские T
 Путь одного запроса в LLM-сервисе, как он выглядит у тебя в web-agent и как о нём говорят на собеседовании:
 
 ```mermaid
-flowchart LR
+flowchart TD
     U["Пользователь\n(виджет / Telegram)"] --> API["FastAPI\n/api/chat"]
     API --> PB["Сборка промпта\nsystem + контекст + вопрос"]
     PB --> PX["Прокси socks5\n(геоблок)"]

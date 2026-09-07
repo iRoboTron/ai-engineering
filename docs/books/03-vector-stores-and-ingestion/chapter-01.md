@@ -90,7 +90,7 @@ LIMIT 5;
 ## Схема
 
 ```mermaid
-flowchart LR
+flowchart TD
     SRC["Источники\nфайлы, URL, API"] --> W["Watcher\nхэш, mtime"]
     W -->|"изменилось"| Q["Очередь\nзадач"]
     Q --> PRS["Парсинг\npypdf / Docling / OCR"]

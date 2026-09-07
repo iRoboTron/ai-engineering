@@ -102,7 +102,7 @@ Golden-набор — 20–50 пар «вопрос → где ответ» (д�
 ## Схема
 
 ```mermaid
-flowchart LR
+flowchart TD
     D["Документы\nPDF / DOCX / HTML / MD"] --> P["Парсинг\nи метаданные"]
     P --> CH["Нарезка\n500/50, заголовки"]
     CH --> E["Эмбеддинги\nbi-encoder"]
