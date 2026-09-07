@@ -149,6 +149,12 @@ docker compose exec -T pg psql -U rag_admin -d rag -v ON_ERROR_STOP=1 -v app_pas
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/load.py
+# %% [markdown]
+# # День 3 · перенос снимка из Chroma в Postgres
+#
+# Векторы уже посчитаны вчера — платить за эмбеддинги второй раз не нужно, `load.py` только копирует
+# id, тексты и векторы в другое хранилище.
+# %%
 """Копирует вчерашний снимок Chroma в Postgres: те же id, тексты и векторы, без пересчёта эмбеддингов."""
 import labkit
 labkit.use_day("day2-rag-eval")  # добавляет day2-rag-eval в sys.path — оттуда common.py
@@ -158,39 +164,54 @@ from common import load_config, snapshot_path
 COLLECTION = "chunks_openai"   # снимок из day2-rag-eval/index.py, который загружаем
 REPLACE_LAB_DATA = False       # True — разрешить перезаписать уже загруженную учебную таблицу (не для прода!)
 
+# %% [markdown]
+# ## Читаем снимок обратно из Chroma
+#
+# Схема этой лабы жёстко рассчитана на 1536 измерений (`vector(1536)` в `schema.sql`) — размерность
+# зафиксирована типом колонки, а не проверкой в коде на всякий случай. Другая модель эмбеддингов дала
+# бы другую размерность — для неё нужна отдельная таблица, не смешивание векторов разных моделей в
+# одной колонке (drill 2 в дне 7 разбирает это на реальной ошибке).
+# %%
+config = load_config(COLLECTION)
+if config["dimension"] != 1536:
+    raise SystemExit("эта учебная схема vector(1536); для другой модели нужна отдельная схема")
+import chromadb
+import numpy as np
+col = chromadb.PersistentClient(path=str(snapshot_path(COLLECTION) / "chroma")).get_collection(COLLECTION)
+data = col.get(include=["embeddings", "documents", "metadatas"])
+rows = [(cid, m["tenant_id"], m["filename"], m["chunk_index"], doc, np.asarray(emb, dtype=np.float32))
+        for cid, doc, m, emb in zip(data["ids"], data["documents"], data["metadatas"], data["embeddings"])]
+if not rows:
+    raise SystemExit("снимок пуст")
+print(f"строк для загрузки: {len(rows)}")
 
-def main() -> None:
-    config = load_config(COLLECTION)
-    if config["dimension"] != 1536:
-        raise SystemExit("эта учебная схема vector(1536); для другой модели нужна отдельная схема")
-    import chromadb
-    import numpy as np
-    import psycopg
-    from pgvector.psycopg import register_vector
-    from psycopg.types.json import Jsonb
-    col = chromadb.PersistentClient(path=str(snapshot_path(COLLECTION) / "chroma")).get_collection(COLLECTION)
-    data = col.get(include=["embeddings", "documents", "metadatas"])
-    rows = [(cid, m["tenant_id"], m["filename"], m["chunk_index"], doc, np.asarray(emb, dtype=np.float32))
-            for cid, doc, m, emb in zip(data["ids"], data["documents"], data["metadatas"], data["embeddings"])]
-    if not rows:
-        raise SystemExit("снимок пуст")
-    with psycopg.connect(labkit.env("PG_ADMIN_DSN", required=True)) as conn:
-        register_vector(conn)                                       # учит psycopg сериализовать numpy-вектор
-        if conn.execute("SELECT current_database(), current_user").fetchone() != ("rag", "rag_admin"):
-            raise RuntimeError("загрузчик разрешён только в учебной БД rag от rag_admin")
-        if conn.execute("SELECT count(*) FROM chunks").fetchone()[0] and not REPLACE_LAB_DATA:
-            raise RuntimeError("таблица непуста; проверь PG_ADMIN_DSN и явно поставь REPLACE_LAB_DATA = True")
-        # Только учебный admin; атомарная замена снимка, политика RLS не отключается.
-        conn.execute("TRUNCATE chunks, lab_snapshot")
-        with conn.cursor() as cur:
-            cur.executemany("INSERT INTO chunks (id, tenant_id, filename, chunk_index, text, embedding) VALUES (%s,%s,%s,%s,%s,%s)", rows)
-        conn.execute("INSERT INTO lab_snapshot (config) VALUES (%s)", (Jsonb(config),))
-        for tenant, count in conn.execute("SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id ORDER BY 1"):
-            print(f"tenant {tenant}: чанков {count}")
-    print(f"загружен снимок {config['dataset_hash']}, строк {len(rows)}")
+# %% [markdown]
+# ## Запись в Postgres — только от имени rag_admin
+#
+# `register_vector` учит psycopg сериализовать numpy-массив в тип `vector`. Роль подключения
+# проверяется явно (`current_user == "rag_admin"`) — это административная роль с `BYPASSRLS`, ей и
+# положено видеть и переписывать все строки при загрузке; обычные запросы приложения идут от `rag_app`
+# и такого права не имеют (день 3, шаг 7). Замена данных — не `INSERT ... ON CONFLICT`, а `TRUNCATE` +
+# вставка заново: для учебного снимка это проще и атомарнее, политика RLS при этом не отключается.
+# %%
+import psycopg
+from pgvector.psycopg import register_vector
+from psycopg.types.json import Jsonb
 
-if __name__ == "__main__":
-    main()
+with psycopg.connect(labkit.env("PG_ADMIN_DSN", required=True)) as conn:
+    register_vector(conn)                                       # учит psycopg сериализовать numpy-вектор
+    if conn.execute("SELECT current_database(), current_user").fetchone() != ("rag", "rag_admin"):
+        raise RuntimeError("загрузчик разрешён только в учебной БД rag от rag_admin")
+    if conn.execute("SELECT count(*) FROM chunks").fetchone()[0] and not REPLACE_LAB_DATA:
+        raise RuntimeError("таблица непуста; проверь PG_ADMIN_DSN и явно поставь REPLACE_LAB_DATA = True")
+    # Только учебный admin; атомарная замена снимка, политика RLS не отключается.
+    conn.execute("TRUNCATE chunks, lab_snapshot")
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO chunks (id, tenant_id, filename, chunk_index, text, embedding) VALUES (%s,%s,%s,%s,%s,%s)", rows)
+    conn.execute("INSERT INTO lab_snapshot (config) VALUES (%s)", (Jsonb(config),))
+    for tenant, count in conn.execute("SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id ORDER BY 1"):
+        print(f"tenant {tenant}: чанков {count}")
+print(f"загружен снимок {config['dataset_hash']}, строк {len(rows)}")
 ```
 
 Запуск: открой `load.ipynb` в VS Code и нажми ▶ Run All. Политика не отключается: административная роль обходит её только при загрузке. Для повторной замены **учебной** таблицы нужен явный `REPLACE_LAB_DATA = True`; в проде применяй версионирование/backfill, а не TRUNCATE. Идентификаторы и tenant берутся из исходного снимка, поэтому сравнение остаётся сопоставимым.
@@ -343,6 +364,12 @@ class PgStore:
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/eval_pg.py
+# %% [markdown]
+# # День 3 · Chroma против pgvector на одном golden-наборе
+#
+# Переиспользуем ровно ту же функцию `evaluate` из дня 2 — метрики и формат таблицы должны совпадать,
+# чтобы сравнение было честным: одна и та же линейка Hit@5/MRR@5 для обеих систем.
+# %%
 """Тот же golden-набор и та же функция evaluate из дня 2 — только Postgres рядом с Chroma, честное сравнение."""
 import time
 
@@ -355,44 +382,50 @@ from eval import evaluate
 COLLECTION = "chunks_openai"   # снимок, загруженный load.py
 GOLDEN_PATH = None             # None — стандартный golden.jsonl
 
+cfg, rows = load_config(COLLECTION), load_rows(COLLECTION)
+golden = golden_for_rows(load_golden(GOLDEN_PATH), rows, require_all=True)
+from embed import Embedder
+from retrievers import Store
+from pgstore import PgStore
 
-def main() -> None:
-    cfg, rows = load_config(COLLECTION), load_rows(COLLECTION)
-    golden = golden_for_rows(load_golden(GOLDEN_PATH), rows, require_all=True)
-    from embed import Embedder
-    from retrievers import Store
-    from pgstore import PgStore
-    embedder = Embedder(cfg["embedder"], cfg["model"])
-    t0 = time.perf_counter()
-    for g in golden:
-        embedder.embed_query(g["q"])
-    print(f"query embeddings, вне поиска: {time.perf_counter() - t0:.2f} s")
-    print("| tenant | retriever | Hit@5 | MRR@5 | p50 ms | p95 ms |")
-    print("|---|---|---|---|---|---|")
-    for tenant in sorted({r["tenant_id"] for r in rows}):
-        subset_rows = [r for r in rows if r["tenant_id"] == tenant]
-        subset = golden_for_rows(golden, subset_rows)
-        if not subset:
-            continue
-        chroma = Store(COLLECTION, embedder, tenant_id=tenant)
-        pg = PgStore(tenant, embedder)
-        try:
-            if pg.snapshot_config() != cfg:
-                raise RuntimeError("Postgres и Chroma содержат разные снимки; повтори контролируемую загрузку")
-            actual = {r["id"]: r for r in pg.visible_rows()}
-            expected = {r["id"]: r for r in subset_rows}
-            if actual != expected:
-                raise RuntimeError("разные документы/tenant: сравнение остановлено")
-            for name, fn in (("Chroma dense", chroma.dense), ("pgvector dense", pg.dense),
-                             ("Chroma BM25", chroma.bm25_search), ("Postgres FTS", pg.fts),
-                             ("Chroma hybrid", chroma.hybrid), ("Postgres hybrid", pg.hybrid)):
-                r = evaluate(name, fn, subset)
-                print(f"| {tenant} ({len(subset)} q) | {name} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} |")
-        finally:
-            pg.close()
+embedder = Embedder(cfg["embedder"], cfg["model"])
+t0 = time.perf_counter()
+for g in golden:
+    embedder.embed_query(g["q"])
+print(f"query embeddings, вне поиска: {time.perf_counter() - t0:.2f} s")
 
-if __name__ == "__main__":
-    main()
+# %% [markdown]
+# ## По каждому tenant отдельно — и сверка, что снимки совпадают
+#
+# `pg.snapshot_config() != cfg` и сверка видимых строк (`actual != expected`) — не формальность: если
+# кто-то загрузил в Postgres другой снимок, чем тот, что сейчас в Chroma, сравнение будет нечестным.
+# Изоляция tenant видна прямо здесь: `PgStore(tenant, embedder)` подключается от `rag_app`, и
+# `pg.visible_rows()` вернёт **только** строки своего tenant — это RLS в действии, ещё до шага 7,
+# где ты проверишь то же самое явными негативными тестами.
+# %%
+print("| tenant | retriever | Hit@5 | MRR@5 | p50 ms | p95 ms |")
+print("|---|---|---|---|---|---|")
+for tenant in sorted({r["tenant_id"] for r in rows}):
+    subset_rows = [r for r in rows if r["tenant_id"] == tenant]
+    subset = golden_for_rows(golden, subset_rows)
+    if not subset:
+        continue
+    chroma = Store(COLLECTION, embedder, tenant_id=tenant)
+    pg = PgStore(tenant, embedder)
+    try:
+        if pg.snapshot_config() != cfg:
+            raise RuntimeError("Postgres и Chroma содержат разные снимки; повтори контролируемую загрузку")
+        actual = {r["id"]: r for r in pg.visible_rows()}
+        expected = {r["id"]: r for r in subset_rows}
+        if actual != expected:
+            raise RuntimeError("разные документы/tenant: сравнение остановлено")
+        for name, fn in (("Chroma dense", chroma.dense), ("pgvector dense", pg.dense),
+                         ("Chroma BM25", chroma.bm25_search), ("Postgres FTS", pg.fts),
+                         ("Chroma hybrid", chroma.hybrid), ("Postgres hybrid", pg.hybrid)):
+            r = evaluate(name, fn, subset)
+            print(f"| {tenant} ({len(subset)} q) | {name} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} |")
+    finally:
+        pg.close()
 ```
 
 Запуск: открой `eval_pg.ipynb` в VS Code и нажми ▶ Run All. Dense сравнивается на одинаковом подкорпусе. ANN-индексы могут давать разные попадания: сравни с exact baseline и параметрами обхода, не объявляй совпадение обязательным. Полнотекстовый поиск Postgres против вчерашнего BM25 со стеммингом — разные алгоритмы, разница ожидаема в обе стороны; запиши, какая.

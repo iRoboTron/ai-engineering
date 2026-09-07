@@ -1,6 +1,6 @@
 # ~/proj/ai-labs/day4-agent/memory_backend.py
 """Хранилище заметок агента. По умолчанию — локальный JSON-файл, без сети и ключей.
-Удалённый сервис памяти подключается отдельно, только если явно задать MEMORY_URL в .env."""
+Удалённый сервис памяти подключается отдельно, только если явно задать LAB_MEMORY_URL в .env."""
 import json
 import re
 import uuid
@@ -16,17 +16,17 @@ def remote(action: str, payload: dict):
     import httpx
 
     # Удалённый сервис — только явный opt-in; проект задаёт оператор, не модель.
-    project = labkit.env("MEMORY_REMOTE_PROJECT")
+    project = labkit.env("LAB_MEMORY_PROJECT")
     if not project or payload.get("project") != project:
-        raise ValueError("MEMORY_REMOTE_PROJECT должен совпадать с проектом запроса")
+        raise ValueError("LAB_MEMORY_PROJECT должен совпадать с проектом запроса")
     with httpx.Client(timeout=30) as client:
-        response = client.post(labkit.env("MEMORY_URL").rstrip("/") + "/" + action, json=payload)
+        response = client.post(labkit.env("LAB_MEMORY_URL").rstrip("/") + "/" + action, json=payload)
         response.raise_for_status()
         return response.json()
 
 
 def search_memory(query: str, project: str = "ai-labs") -> str:
-    if labkit.env("MEMORY_URL"):
+    if labkit.env("LAB_MEMORY_URL"):
         items = remote("search", {"query": query, "project": project, "limit": 5})["results"]
     else:
         saved = json.loads(LOCAL.read_text()) if LOCAL.exists() else []
@@ -40,7 +40,7 @@ def store_memory(title: str, content: str, project: str = "ai-labs") -> str:
     if not title.strip() or not content.strip() or len(title) > 200 or len(content) > 2000:
         raise ValueError("Некорректный размер заметки")
     item = {"title": title, "content": content, "project": project, "type": "knowledge", "scope": "project"}
-    if labkit.env("MEMORY_URL"):
+    if labkit.env("LAB_MEMORY_URL"):
         return f"сохранено, id={remote('store', item)['id']}"
     LOCAL.parent.mkdir(parents=True, exist_ok=True)
     items = json.loads(LOCAL.read_text()) if LOCAL.exists() else []

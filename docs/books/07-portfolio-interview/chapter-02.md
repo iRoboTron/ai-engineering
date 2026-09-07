@@ -125,6 +125,13 @@ pgvector с RLS вместо Chroma (план из 5 шагов), condense quest
 
 ```python
 # ~/proj/ai-labs/day7-interview/mock.py
+# %% [markdown]
+# # День 7 · mock-интервью на случайных вопросах
+#
+# `input()` работает в Jupyter точно так же, как в терминале — VS Code покажет строку ввода прямо
+# над ячейкой. Суть ответа печатается только после того, как ты уже ответил вслух и нажал Enter —
+# подглядеть заранее нельзя, разве что прокрутить вывод самому.
+# %%
 """Случайные вопросы из банка приложения A. Отвечаешь вслух, суть ответа показывается только после твоей попытки."""
 import random
 import re
@@ -135,6 +142,12 @@ N = 60      # сколько вопросов задать за один про�
 
 BANK = Path.home() / "Documents/lessons/ai-engineering/docs/books/07-portfolio-interview/appendix-a.md"
 
+# %% [markdown]
+# ## Разбор банка вопросов
+#
+# `appendix-a.md` — обычный Markdown с заголовками разделов (`## Тема`) и списком `**Вопрос** — суть
+# ответа`; ячейка ниже просто читает его построчно и достаёт из этой структуры плоский список.
+# %%
 items = []
 section = ""
 for line in BANK.read_text(encoding="utf-8").splitlines():
@@ -143,7 +156,11 @@ for line in BANK.read_text(encoding="utf-8").splitlines():
     m = re.match(r"- \*\*(.+?)\*\* — (.+)", line)
     if m:
         items.append((section, m.group(1), m.group(2)))
+print(f"вопросов в банке: {len(items)}")
 
+# %% [markdown]
+# ## Сам опрос
+# %%
 picked = random.sample(items, min(N, len(items)))
 scores = []
 for i, (section, q, a) in enumerate(picked, 1):
@@ -152,6 +169,9 @@ for i, (section, q, a) in enumerate(picked, 1):
     s = input("оценка 0 (не смог) / 1 (частично) / 2 (уверенно): ").strip()
     scores.append((section, q, int(s) if s in "012" and s else 0))
 
+# %% [markdown]
+# ## Итог и слабые темы
+# %%
 total = sum(s for _, _, s in scores)
 print(f"\nитого: {total}/{2 * len(scores)} ({100 * total / (2 * len(scores)):.0f} %)")
 weak = [(sec, q) for sec, q, s in scores if s < 2]

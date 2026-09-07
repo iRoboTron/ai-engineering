@@ -37,13 +37,13 @@ flowchart LR
 
 ## Подготовка
 
-Нужны окружение и учебный индекс дня 2: `.local/chunks_openai/`. Скрипты установлены из репозитория через `python3 scripts/install_labs.py --dest ~/proj/ai-labs`; относительные пути вычисляются от файла, а не cwd. LLM и эмбеддинги OpenRouter платные; необходим ключ, поддержка tools и отдельная квота ключа. Без API сначала запусти offline regression suite репозитория. Память по умолчанию — локальный учебный JSON в `.local/`, приватные сервисы не требуются. Удалённый `ai-agent-memory` — только дополнительный opt-in через `MEMORY_URL` и `MEMORY_REMOTE_PROJECT`, после проверки доступа и разрешения на передачу данных.
+Нужны окружение и учебный индекс дня 2: `.local/chunks_openai/`. Скрипты установлены из репозитория через `python3 scripts/install_labs.py --dest ~/proj/ai-labs`; относительные пути вычисляются от файла, а не cwd. LLM и эмбеддинги OpenRouter платные; необходим ключ, поддержка tools и отдельная квота ключа. Без API сначала запусти offline regression suite репозитория. Память по умолчанию — локальный учебный JSON в `.local/`, приватные сервисы не требуются. Удалённый `ai-agent-memory` — только дополнительный opt-in через `LAB_MEMORY_URL` и `LAB_MEMORY_PROJECT` (имена намеренно не совпадают ни с чем стандартным: если у тебя уже есть свой сервис долговременной памяти для агентов с переменной `MEMORY_URL` в системном окружении, лаба не должна случайно достучаться до него вместо локального JSON).
 
 ```bash
 cd ~/proj/ai-labs && source .venv/bin/activate && source .env
 python -m pip install --require-hashes -r requirements.txt
 mkdir -p day4-agent && cd day4-agent
-unset MEMORY_URL MEMORY_REMOTE_PROJECT  # безопасная локальная память
+unset LAB_MEMORY_URL LAB_MEMORY_PROJECT  # безопасная локальная память (на случай, если заданы в .env или окружении)
 python -c "from importlib.metadata import version; print(version('langgraph'))"
 ```
 
@@ -118,7 +118,7 @@ WRITE_TOOLS = {"save_note", "memory_store"}                # требуют inte
 ```python
 # ~/proj/ai-labs/day4-agent/memory_backend.py
 """Хранилище заметок агента. По умолчанию — локальный JSON-файл, без сети и ключей.
-Удалённый сервис памяти подключается отдельно, только если явно задать MEMORY_URL в .env."""
+Удалённый сервис памяти подключается отдельно, только если явно задать LAB_MEMORY_URL в .env."""
 import json
 import re
 import uuid
@@ -134,17 +134,17 @@ def remote(action: str, payload: dict):
     import httpx
 
     # Удалённый сервис — только явный opt-in; проект задаёт оператор, не модель.
-    project = labkit.env("MEMORY_REMOTE_PROJECT")
+    project = labkit.env("LAB_MEMORY_PROJECT")
     if not project or payload.get("project") != project:
-        raise ValueError("MEMORY_REMOTE_PROJECT должен совпадать с проектом запроса")
+        raise ValueError("LAB_MEMORY_PROJECT должен совпадать с проектом запроса")
     with httpx.Client(timeout=30) as client:
-        response = client.post(labkit.env("MEMORY_URL").rstrip("/") + "/" + action, json=payload)
+        response = client.post(labkit.env("LAB_MEMORY_URL").rstrip("/") + "/" + action, json=payload)
         response.raise_for_status()
         return response.json()
 
 
 def search_memory(query: str, project: str = "ai-labs") -> str:
-    if labkit.env("MEMORY_URL"):
+    if labkit.env("LAB_MEMORY_URL"):
         items = remote("search", {"query": query, "project": project, "limit": 5})["results"]
     else:
         saved = json.loads(LOCAL.read_text()) if LOCAL.exists() else []
@@ -158,7 +158,7 @@ def store_memory(title: str, content: str, project: str = "ai-labs") -> str:
     if not title.strip() or not content.strip() or len(title) > 200 or len(content) > 2000:
         raise ValueError("Некорректный размер заметки")
     item = {"title": title, "content": content, "project": project, "type": "knowledge", "scope": "project"}
-    if labkit.env("MEMORY_URL"):
+    if labkit.env("LAB_MEMORY_URL"):
         return f"сохранено, id={remote('store', item)['id']}"
     LOCAL.parent.mkdir(parents=True, exist_ok=True)
     items = json.loads(LOCAL.read_text()) if LOCAL.exists() else []
@@ -439,12 +439,21 @@ if __name__ == "__main__":
 
 ```python
 # ~/proj/ai-labs/day4-agent/agent_mcp.py
+# %% [markdown]
+# # День 4 · тот же агент, но инструмент — по MCP
+#
+# Разница с `agent.py` только в том, откуда берётся инструмент памяти: там — прямой импорт функции
+# Python, здесь — отдельный процесс (`mcp_memory_server.py`), с которым мы говорим по протоколу
+# **MCP** через stdin/stdout. Это ровно то, что произойдёт с любым настоящим внешним MCP-сервером:
+# граф, узлы, `interrupt`, checkpointer — всё то же самое, инструмент просто пришёл по проводу, а не
+# импортом.
+# %%
 """Тот же агент, что в agent.py, но инструмент памяти приходит по MCP, а не импортом Python-функции —
 так же, как будет с настоящим внешним MCP-сервером."""
 import asyncio
 import os
 import sys
-from pathlib import Path
+import threading
 
 import labkit  # noqa: F401  подключает .env до запуска дочернего процесса
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -457,6 +466,38 @@ QUESTION = "Найди в памяти заметку про Ollama в прое�
 MEMORY_SERVER = labkit.ROOT / "day4-agent" / "mcp_memory_server.py"
 
 
+def run_async(coro):
+    """asyncio.run(), но безопасно и в обычном скрипте, и в Jupyter — там уже крутится свой event
+    loop, и обычный asyncio.run() внутри него падает с RuntimeError. Если цикл уже запущен —
+    досчитываем корутину в отдельном потоке с собственным свежим циклом; исключение из потока
+    пробрасываем в вызывающий поток сами — по умолчанию поток его просто печатает и теряет."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)                  # обычный скрипт: активного цикла нет, путь как всегда
+    box: dict = {}
+
+    def worker():
+        try:
+            box["value"] = asyncio.run(coro)
+        except BaseException as exc:              # ловим и исключения-не-Exception (например, SystemExit)
+            box["error"] = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+# %% [markdown]
+# ## MCP-клиент: спросить у сервера, какие у него есть инструменты
+#
+# `MultiServerMCPClient` запускает `mcp_memory_server.py` как дочерний процесс и говорит с ним по
+# `stdio` — тому самому транспорту MCP, которым Claude Code подключается к серверам инструментов.
+# `client.get_tools()` возвращает их в виде обычных инструментов LangChain — дальше граф не отличает
+# их от `search_docs`, импортированного напрямую.
+# %%
 async def main(question: str):
     client = MultiServerMCPClient({"memory": {
         "command": sys.executable,                                              # тот же python, что и здесь
@@ -470,9 +511,9 @@ async def main(question: str):
     graph = build_graph([search_docs, *tools], await pricing())
     await run(graph, question, thread_id="mcp")
 
-
+# %%
 if __name__ == "__main__":
-    asyncio.run(main(QUESTION))
+    run_async(main(QUESTION))
 ```
 
 В `agent_mcp.ipynb` поставь `QUESTION = "Запомни в проект ai-labs: тест MCP HITL"` и нажми ▶ Run All. Отказ не создаёт запись, согласие — создаёт. `memory_store` заранее входит в `WRITE_TOOLS`; асинхронный guard вызывает `await ToolNode.ainvoke`, а оба CLI используют общий цикл `interrupt → Command(resume=...)`. Простого `graph.ainvoke` с вложенным синхронным `ToolNode.invoke` недостаточно: MCP-инструменты async-only. Неизвестные имена отклоняются при сборке графа.

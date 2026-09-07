@@ -188,6 +188,13 @@ if __name__ == "__main__":
 
 ```python
 # ~/proj/ai-labs/day5-evals/experiment.py
+# %% [markdown]
+# # День 5 · именованный прогон golden-набора в Langfuse
+#
+# `rag_pipeline.rag()` уже трейсит каждый шаг (день 5, шаг 2); этот файл прогоняет через неё **весь**
+# golden-набор целиком и группирует трейсы в один именованный **dataset run** — так в UI Langfuse
+# можно сравнить `dense-v1` с `hybrid-v1` не по одному вопросу, а по всему набору сразу.
+# %%
 """Прогоняет весь golden-набор через rag_pipeline и записывает трейсы как один именованный прогон в Langfuse."""
 import hashlib
 import json
@@ -205,7 +212,14 @@ MODE = "hybrid_rerank"          # "dense" или "hybrid_rerank" — какой 
 RUN_NAME = "hybrid-v1"          # имя прогона в Langfuse; для второго прохода — MODE="dense", RUN_NAME="dense-v1"
 EXPORT_SYNTHETIC = True         # явное подтверждение: набор вопросов учебный, публиковать в Langfuse можно
 
-
+# %% [markdown]
+# ## Dataset в Langfuse: имя зависит от содержимого
+#
+# Имя датасета — хэш от самого golden-набора: если вопросы не менялись, повторный вызов находит тот
+# же датасет (`create_dataset` — create-or-update), а не плодит дубликаты; если набор изменился —
+# получится новое имя, и старые прогоны останутся сравнимыми между собой, а не смешаются с новыми
+# вопросами.
+# %%
 def ensure_dataset() -> str:
     if not EXPORT_SYNTHETIC:
         raise RuntimeError("Экспорт текстов требует EXPORT_SYNTHETIC = True; сначала проверь, что набор учебный")
@@ -239,18 +253,24 @@ def run(dataset: str, mode: str, name: str) -> list[dict]:
     get_client().flush()
     return rows
 
-
-if __name__ == "__main__":
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", RUN_NAME):
-        raise ValueError("RUN_NAME: только буквы, цифры, _ и -")
-    dataset = ensure_dataset()
-    rows = run(dataset, MODE, RUN_NAME)
-    if not rows:
-        raise RuntimeError("Пустой датасет")
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    path = OUTPUT / f"run-{RUN_NAME}.json"
-    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"{dataset}: {len(rows)} вопросов; локальный отчёт {path}")
+# %% [markdown]
+# ## Запуск: результат остаётся в переменной `rows`
+#
+# После этой ячейки `rows` — список словарей с ответами, трейсами и попаданиями по каждому вопросу:
+# можно сразу посмотреть `rows[0]` или посчитать `sum(r["hit"] for r in rows)`, не открывая
+# `.local/run-*.json` отдельно. Файл всё равно сохраняется — он нужен `ragas_eval.py` и `judge.py`
+# ниже, которые запускаются отдельно (в т.ч. на другой день).
+# %%
+if not re.fullmatch(r"[A-Za-z0-9_-]+", RUN_NAME):
+    raise ValueError("RUN_NAME: только буквы, цифры, _ и -")
+dataset = ensure_dataset()
+rows = run(dataset, MODE, RUN_NAME)
+if not rows:
+    raise RuntimeError("Пустой датасет")
+OUTPUT.mkdir(parents=True, exist_ok=True)
+path = OUTPUT / f"run-{RUN_NAME}.json"
+path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"{dataset}: {len(rows)} вопросов; локальный отчёт {path}")
 ```
 
 `experiment.ipynb` уже настроен на `MODE = "hybrid_rerank"`, `RUN_NAME = "hybrid-v1"` — нажми ▶ Run All.
@@ -264,6 +284,13 @@ if __name__ == "__main__":
 
 ```python
 # ~/proj/ai-labs/day5-evals/ragas_eval.py
+# %% [markdown]
+# # День 5 · RAGAS: готовые метрики оценки RAG
+#
+# `evaluate()` из RAGAS сам гоняет свою модель-судью по каждому вопросу прогона и считает несколько
+# метрик за один проход. `judge` (`LangchainLLMWrapper`) и `emb` (`LangchainEmbeddingsWrapper`) — это
+# просто обёртки над теми же клиентами, что и всюду в курсе, RAGAS требует именно такой интерфейс.
+# %%
 """Считает три готовые метрики RAGAS по сохранённому прогону experiment.py и пишет их в Langfuse."""
 import json
 from pathlib import Path
@@ -291,6 +318,13 @@ if not rows:
 judge = LangchainLLMWrapper(ChatOpenAI(model=JUDGE, base_url=BASE_URL, api_key=KEY, temperature=0, timeout=120))
 emb = LangchainEmbeddingsWrapper(OpenAIEmbeddings(model="openai/text-embedding-3-small", base_url=BASE_URL, api_key=KEY, check_embedding_ctx_length=False))
 
+# %% [markdown]
+# ## Faithfulness, relevancy, context precision — и context recall отдельно
+#
+# `context_recall` считается только там, где есть `reference` (эталонный ответ человека) — честных
+# отказов и вопросов без эталона это не касается, поэтому набор для него меньше основного и
+# результаты аккуратно приджойнены обратно по `user_input`, а не просто пересчитаны средним по всем.
+# %%
 rows = [r for r in rows if not r.get("unanswerable")]
 if not rows:
     raise ValueError("Нет answerable-примеров для RAGAS; отказы оцениваются отдельно")
@@ -307,6 +341,13 @@ skip = {"user_input", "response", "retrieved_contexts", "reference"}
 metric_cols = [c for c in df.columns if c not in skip]
 print(df[metric_cols].describe().loc[["mean", "min"]].round(3).to_markdown())
 
+# %% [markdown]
+# ## Оценки уходят обратно в те же трейсы
+#
+# `df` уже в памяти ноутбука после предыдущей ячейки — можно сразу посмотреть `df.head()` отдельной
+# ячейкой. Ниже — запись метрик обратно в Langfuse, к тем же `trace_id`, что создал `experiment.py`:
+# так в UI прогон и его метрики качества видны рядом, а не в отдельном отчёте.
+# %%
 for r, (_, s) in zip(rows, df.iterrows()):
     for name in metric_cols:
         value = s[name]
@@ -327,6 +368,13 @@ RAGAS не знает твоей задачи. Свой судья с рубри
 
 ```python
 # ~/proj/ai-labs/day5-evals/judge.py
+# %% [markdown]
+# # День 5 · свой судья с рубрикой, откалиброванный на твоей разметке
+#
+# RAGAS (выше) не знает твою задачу — это общие метрики. Здесь судья оценивает конкретно
+# «правильность по эталону» по своей рубрике, а затем сверяется с тем, как ты сам разметил те же
+# ответы, — это и есть калибровка судьи.
+# %%
 """Свой судья с рубрикой «правильность по эталону», плюс проверка согласия с твоей ручной разметкой."""
 import json
 from pathlib import Path
@@ -349,7 +397,12 @@ RUBRIC = """Ты судья качества ответа службы подд�
 0 — ключевые факты отсутствуют или есть противоречие эталону. Честный отказ при отсутствии ответа в эталоне = 2.
 Сначала напиши обоснование в одно предложение, потом оценку."""
 
-
+# %% [markdown]
+# ## Судья: structured output по своей же схеме
+#
+# `temperature=0` и `response_format=json_schema` — те же приёмы, что в дне 1: судья должен быть
+# воспроизводимым и возвращать разбираемый ответ, а не текст, который приходится парсить регуляркой.
+# %%
 class Verdict(BaseModel):
     reasoning: str = Field(description="Одно предложение: что совпало, что нет")
     score: int = Field(ge=0, le=2)
@@ -363,26 +416,32 @@ def judge(question: str, answer: str, reference: str) -> Verdict:
     )
     return Verdict.model_validate_json(r.choices[0].message.content)
 
-
-if __name__ == "__main__":
-    here = labkit.ROOT / "day5-evals"  # не Path(__file__): этот файл — ноутбук, в ячейке Jupyter __file__ не определён
-    path = here / RUN_FILE
-    rows = [r for r in json.loads(path.read_text(encoding="utf-8")) if r.get("reference")]
-    manual_path = here / ".local" / "manual_labels.json"
-    manual = json.loads(manual_path.read_text(encoding="utf-8")) if manual_path.exists() else {}
-    agree, total = 0, 0
-    for r in rows:
-        v = judge(r["question"], r["answer"], r["reference"])
-        langfuse.create_score(trace_id=r["trace_id"], name="correctness_judge", value=v.score / 2, comment="Synthetic rubric v1")
-        mark = ""
-        if r["question"] in manual:
-            total += 1
-            agree += int(manual[r["question"]] == v.score)
-            mark = f" | человек: {manual[r['question']]}"
-        print(f"{v.score} | {r['question'][:60]} | {v.reasoning[:80]}{mark}")
-    langfuse.flush()
-    if total:
-        print(f"\nсогласие судьи с ручной разметкой: {agree}/{total}")
+# %% [markdown]
+# ## Сверка с ручной разметкой
+#
+# Перед запуском размечены сам вручную несколько ответов в `.local/manual_labels.json`, не глядя на
+# судью, — иначе сверка ничего не докажет. `agree/total` ниже — простое согласие по разметке; на
+# малом числе примеров это только smoke-проверка рубрики, не полноценная калибровка (нужна
+# независимая стратифицированная выборка и матрица ошибок, как отмечено в тексте главы).
+# %%
+here = labkit.ROOT / "day5-evals"  # не Path(__file__): этот файл — ноутбук, в ячейке Jupyter __file__ не определён
+path = here / RUN_FILE
+rows = [r for r in json.loads(path.read_text(encoding="utf-8")) if r.get("reference")]
+manual_path = here / ".local" / "manual_labels.json"
+manual = json.loads(manual_path.read_text(encoding="utf-8")) if manual_path.exists() else {}
+agree, total = 0, 0
+for r in rows:
+    v = judge(r["question"], r["answer"], r["reference"])
+    langfuse.create_score(trace_id=r["trace_id"], name="correctness_judge", value=v.score / 2, comment="Synthetic rubric v1")
+    mark = ""
+    if r["question"] in manual:
+        total += 1
+        agree += int(manual[r["question"]] == v.score)
+        mark = f" | человек: {manual[r['question']]}"
+    print(f"{v.score} | {r['question'][:60]} | {v.reasoning[:80]}{mark}")
+langfuse.flush()
+if total:
+    print(f"\nсогласие судьи с ручной разметкой: {agree}/{total}")
 ```
 
 Перед запуском разметь сам пять ответов из `.local/run-hybrid-v1.json` по той же шкале 0–2 в `.local/manual_labels.json` (`{"вопрос": 2, ...}`), не глядя на судью. Запуск: открой `judge.ipynb` в VS Code и нажми ▶ Run All (уже настроен на `.local/run-hybrid-v1.json`). Согласие 4/5 — только smoke-проверка рубрики: пяти случаев недостаточно для доверия на всём трафике. Нужна независимая стратифицированная выборка (ошибки, отказы, языки), матрица ошибок и интервальная оценка; повторно не оценивай рубрику только на примерах её настройки. При 2/5 разбери расхождения и рубрику, не подгоняй эталон. Число согласия — в отчёт: это и есть предварительная калибровка.

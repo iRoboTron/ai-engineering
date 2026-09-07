@@ -221,9 +221,15 @@ class Embedder:
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/index.py
-"""Строит один снимок индекса: режет документы на чанки, считает векторы, кладёт в Chroma и в chunks.jsonl.
-Настройки — константы ниже, не аргументы командной строки: поменял значение, сохранил файл, нажал Run —
-получил новый снимок под новым именем. Старые снимки не трогает и не перезаписывает."""
+# %% [markdown]
+# # День 2 · индексация: чанки → векторы → снимок
+#
+# Код ниже — не функция, а последовательность ячеек: после запуска в переменных `rows`, `vectors`,
+# `config` останутся реальные данные, которые можно посмотреть отдельной ячейкой (`len(rows)`,
+# `rows[0]`) — в этом разница между ноутбуком и обычным скриптом. Настройки — константы, не аргументы
+# командной строки: поменял значение, сохранил файл, нажал Run — получил новый снимок под новым
+# именем; старые снимки не трогает и не перезаписывает.
+# %%
 import json
 
 import labkit                          # noqa: F401  подключает .env и пути labkit.FIXTURES/labkit.ROOT
@@ -241,52 +247,82 @@ TITLE_PREFIX = False                   # True — дописывать имя ф
 
 SUPPORTED = {".md", ".txt", ".pdf", ".docx", ".html", ".htm"}
 
+dest = snapshot_path(COLLECTION)
+if dest.exists():
+    raise SystemExit(f"снимок {COLLECTION} уже существует: смени COLLECTION вверху файла, перезаписи нет")
+if not CORPUS.is_dir():
+    raise SystemExit("каталог корпуса не существует")
 
-def main() -> None:
-    dest = snapshot_path(COLLECTION)
-    if dest.exists():
-        raise SystemExit(f"снимок {COLLECTION} уже существует: смени COLLECTION вверху файла, перезаписи нет")
-    if not CORPUS.is_dir():
-        raise SystemExit("каталог корпуса не существует")
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-    rows = []
-    for path in sorted(CORPUS.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in SUPPORTED:
-            continue
-        filename = path.relative_to(CORPUS).as_posix()
-        for i, chunk in enumerate(splitter.split_text(parse(path))):
-            rows.append({"id": f"{filename}:{i}", "text": chunk, "filename": filename, "chunk_index": i})
-    if not rows:
-        raise SystemExit("не извлечено ни одного чанка")
-    tenants = tenant_map(r["filename"] for r in rows)          # делит документы на двух учебных арендаторов (день 3)
-    for row in rows:
-        row["tenant_id"] = tenants[row["filename"]]
-    from embed import Embedder
-    to_embed = [f"{r['filename']}\n{r['text']}" if TITLE_PREFIX else r["text"] for r in rows]
-    vectors = Embedder(EMBEDDER, MODEL).embed_documents(to_embed)
-    if len(vectors) != len(rows):
-        raise RuntimeError("число векторов не совпадает с числом чанков")
-    config = {"collection": COLLECTION, "embedder": EMBEDDER, "model": MODEL,
-              "dimension": len(vectors[0]), "chunk_size": CHUNK_SIZE,
-              "chunk_overlap": CHUNK_OVERLAP, "title_prefix": TITLE_PREFIX,
-              "dataset_hash": dataset_hash(rows), "documents": len(tenants)}
-    dest.mkdir(parents=True, exist_ok=False)
-    import chromadb
-    client = chromadb.PersistentClient(path=str(dest / "chroma"))     # локальная векторная база, файлы на диске
-    col = client.create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
-    for s in range(0, len(rows), 500):                         # пачками, чтобы не упереться в лимит одного add()
-        batch = rows[s:s + 500]
-        col.add(ids=[r["id"] for r in batch], documents=[r["text"] for r in batch],
-                embeddings=vectors[s:s + 500],
-                metadatas=[{k: v for k, v in r.items() if k not in {"id", "text"}} for r in batch])
-    (dest / "chunks.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-    (dest / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"снимок {COLLECTION}: документов {len(tenants)}, чанков {col.count()}, dim={config['dimension']}")
+# %% [markdown]
+# ## Нарезка: чанк, overlap
+#
+# `RecursiveCharacterTextSplitter` режет текст на фрагменты по `CHUNK_SIZE` символов, стараясь не
+# рвать текст посреди слова/абзаца. `CHUNK_OVERLAP` — общая часть соседних чанков: если важный факт
+# приходится ровно на границу разреза, перекрытие даёт шанс, что он целиком попадёт хотя бы в один
+# из двух соседних фрагментов, а не потеряется между ними.
+# %%
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+rows = []
+for path in sorted(CORPUS.rglob("*")):
+    if not path.is_file() or path.suffix.lower() not in SUPPORTED:
+        continue
+    filename = path.relative_to(CORPUS).as_posix()
+    for i, chunk in enumerate(splitter.split_text(parse(path))):
+        rows.append({"id": f"{filename}:{i}", "text": chunk, "filename": filename, "chunk_index": i})
+if not rows:
+    raise SystemExit("не извлечено ни одного чанка")
+print(f"чанков нарезано: {len(rows)}")
 
-if __name__ == "__main__":
-    main()
+# %% [markdown]
+# ## Изоляция tenant: кто есть кто в мультитенантной системе
+#
+# `tenant_map` делит документы поровну между двумя учебными «арендаторами» — это заготовка для дня 3,
+# где ты увидишь, как row-level security в Postgres не даёт одному tenant увидеть чанки другого.
+# %%
+tenants = tenant_map(r["filename"] for r in rows)          # делит документы на двух учебных арендаторов (день 3)
+for row in rows:
+    row["tenant_id"] = tenants[row["filename"]]
+
+# %% [markdown]
+# ## Эмбеддинг: текст → вектор фиксированной длины
+#
+# Каждый чанк превращается в вектор, где близкие по смыслу тексты дают близкие вектора — на этом
+# держится весь поиск по смыслу (`dense`) в шаге 5. `TITLE_PREFIX` — эксперимент шага 7: если приписать
+# имя файла перед текстом до эмбеддинга, у модели будет больше контекста о происхождении фрагмента.
+# %%
+from embed import Embedder
+
+to_embed = [f"{r['filename']}\n{r['text']}" if TITLE_PREFIX else r["text"] for r in rows]
+vectors = Embedder(EMBEDDER, MODEL).embed_documents(to_embed)
+if len(vectors) != len(rows):
+    raise RuntimeError("число векторов не совпадает с числом чанков")
+config = {"collection": COLLECTION, "embedder": EMBEDDER, "model": MODEL,
+          "dimension": len(vectors[0]), "chunk_size": CHUNK_SIZE,
+          "chunk_overlap": CHUNK_OVERLAP, "title_prefix": TITLE_PREFIX,
+          "dataset_hash": dataset_hash(rows), "documents": len(tenants)}
+print(f"размерность вектора: {config['dimension']}")
+
+# %% [markdown]
+# ## Косинусное сходство и запись снимка
+#
+# `metadata={"hnsw:space": "cosine"}` — Chroma будет мерить близость векторов по косинусному сходству
+# (углу между векторами), а не по умолчанию (L2): для нормализованных эмбеддингов порядок результатов
+# обычно совпадает, но метрика должна быть задана явно, а не оставлена на умолчание провайдера.
+# %%
+dest.mkdir(parents=True, exist_ok=False)
+import chromadb
+client = chromadb.PersistentClient(path=str(dest / "chroma"))     # локальная векторная база, файлы на диске
+col = client.create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
+for s in range(0, len(rows), 500):                         # пачками, чтобы не упереться в лимит одного add()
+    batch = rows[s:s + 500]
+    col.add(ids=[r["id"] for r in batch], documents=[r["text"] for r in batch],
+            embeddings=vectors[s:s + 500],
+            metadatas=[{k: v for k, v in r.items() if k not in {"id", "text"}} for r in batch])
+(dest / "chunks.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+(dest / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"снимок {COLLECTION}: документов {len(tenants)}, чанков {col.count()}, dim={config['dimension']}")
 ```
 
 Запуск: открой `index.ipynb` в VS Code и нажми ▶ Run All. На fixture ожидаемо несколько десятков чанков и размерность 1536 для `text-embedding-3-small`. Запиши число чанков и стоимость индексации: OpenRouter возвращает `usage` и на эмбеддинги, посмотри в личном кабинете или добавь печать `r.usage` в `embed.py`.
