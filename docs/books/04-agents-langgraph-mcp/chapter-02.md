@@ -18,7 +18,7 @@ flowchart LR
     GR --> TR["Трейс\nшаги, токены, $"]
     TR --> RES["results.md"]
     MCP["mcp_memory_server.py\nFastMCP, stdio"] --> MEM
-    MCP -. langchain-mcp-adapters .-> GR2["agent_mcp.py\nтот же граф"]
+    MCP -. langchain-mcp-adapters .-> GR2["agent_mcp.ipynb\nтот же граф"]
     MCP -. claude mcp add .-> CC["Claude Code"]
 
     style Q fill:#2d2d2d,color:#fff
@@ -453,12 +453,14 @@ from tools import search_docs
 
 # --- НАСТРОЙКИ ---
 QUESTION = "Найди в памяти заметку про Ollama в проекте ai-labs"
+# labkit.ROOT, не Path(__file__): этот файл — ноутбук, а в ячейке Jupyter __file__ не определён.
+MEMORY_SERVER = labkit.ROOT / "day4-agent" / "mcp_memory_server.py"
 
 
 async def main(question: str):
     client = MultiServerMCPClient({"memory": {
         "command": sys.executable,                                              # тот же python, что и здесь
-        "args": [str(Path(__file__).resolve().with_name("mcp_memory_server.py"))],
+        "args": [str(MEMORY_SERVER)],
         "transport": "stdio",
         # Выделенный клиент знает write-policy до получения инструментов.
         "env": {**os.environ, "MCP_MEMORY_WRITES": "1"},
@@ -473,7 +475,7 @@ if __name__ == "__main__":
     asyncio.run(main(QUESTION))
 ```
 
-Поставь `QUESTION = "Запомни в проект ai-labs: тест MCP HITL"` и нажми Run. Отказ не создаёт запись, согласие — создаёт. `memory_store` заранее входит в `WRITE_TOOLS`; асинхронный guard вызывает `await ToolNode.ainvoke`, а оба CLI используют общий цикл `interrupt → Command(resume=...)`. Простого `graph.ainvoke` с вложенным синхронным `ToolNode.invoke` недостаточно: MCP-инструменты async-only. Неизвестные имена отклоняются при сборке графа.
+В `agent_mcp.ipynb` поставь `QUESTION = "Запомни в проект ai-labs: тест MCP HITL"` и нажми ▶ Run All. Отказ не создаёт запись, согласие — создаёт. `memory_store` заранее входит в `WRITE_TOOLS`; асинхронный guard вызывает `await ToolNode.ainvoke`, а оба CLI используют общий цикл `interrupt → Command(resume=...)`. Простого `graph.ainvoke` с вложенным синхронным `ToolNode.invoke` недостаточно: MCP-инструменты async-only. Неизвестные имена отклоняются при сборке графа.
 
 Подключение к Claude Code — одна команда, и локальная учебная память доступна для чтения (не задавай `MCP_MEMORY_WRITES` этому клиенту):
 
@@ -528,5 +530,5 @@ claude mcp list
 - HITL: отказ не сохраняет заметку, согласие — сохраняет (проверено `локальный JSON памяти`).
 - Детерминированные тесты трёх остановок пройдены; live-прогоны помечены отдельно: лимит шагов, лимит бюджета, повторный вызов; сообщения в отчёте.
 - Уточняющий вопрос в том же `thread_id` понят благодаря checkpointer.
-- `agent_mcp.py` печатает инструменты, полученные по MCP, и отвечает через них; `claude mcp list` показывает `agent-memory`.
+- `agent_mcp.ipynb` печатает инструменты, полученные по MCP, и отвечает через них; `claude mcp list` показывает `agent-memory`.
 - В `results.md` — таблица из восьми прогонов и выводы; коммит запушен.

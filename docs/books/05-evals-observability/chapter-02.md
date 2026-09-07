@@ -9,14 +9,14 @@
 ```mermaid
 flowchart LR
     LF["Langfuse\ndocker compose\npxhome или локально"] --> KEYS["Ключи проекта\nLANGFUSE_*"]
-    G["golden.jsonl дня 2\n+ reference для 10"] --> DS["experiment.py\nдатасет golden-rag-v1"]
+    G["golden.jsonl дня 2\n+ reference для 10"] --> DS["experiment.ipynb\nдатасет golden-rag-v1"]
     DS --> R1["прогон dense"]
     DS --> R2["прогон hybrid+rerank"]
     P["rag_pipeline.py\n@observe retrieve/generate"] --> R1
     P --> R2
-    R1 --> RG["ragas_eval.py\n3 метрики → scores"]
+    R1 --> RG["ragas_eval.ipynb\n3 метрики → scores"]
     R2 --> RG
-    R1 --> JD["judge.py\nрубрика + 5 ручных"]
+    R1 --> JD["judge.ipynb\nрубрика + 5 ручных"]
     R2 --> JD
     RG --> CMP["Langfuse UI\nсравнение прогонов"]
     JD --> CMP
@@ -253,8 +253,8 @@ if __name__ == "__main__":
     print(f"{dataset}: {len(rows)} вопросов; локальный отчёт {path}")
 ```
 
-`experiment.py` уже настроен на `MODE = "hybrid_rerank"`, `RUN_NAME = "hybrid-v1"` — нажми Run.
-Затем поставь `MODE = "dense"`, `RUN_NAME = "dense-v1"` и запусти снова.
+`experiment.ipynb` уже настроен на `MODE = "hybrid_rerank"`, `RUN_NAME = "hybrid-v1"` — нажми ▶ Run All.
+Затем поставь `MODE = "dense"`, `RUN_NAME = "dense-v1"` и нажми ▶ Run All снова.
 
 В Langfuse: Datasets → `golden-rag-<hash>` → два прогона, у каждого элемента — трейс и оценка `retrieval_hit`. Уже сейчас видно сравнение поиска по прогонам; дальше добавим оценки генерации.
 
@@ -284,7 +284,7 @@ JUDGE = labkit.env("JUDGE_MODEL", required=True)
 KEY = labkit.env("OPENROUTER_API_KEY", required=True)
 langfuse = get_client()
 
-path = Path(__file__).resolve().parent / RUN_FILE
+path = labkit.ROOT / "day5-evals" / RUN_FILE  # не Path(__file__): этот файл — ноутбук, __file__ там не определён
 rows = json.loads(path.read_text(encoding="utf-8"))
 if not rows:
     raise ValueError("Пустой прогон")
@@ -316,8 +316,8 @@ langfuse.flush()
 print(f"оценки записаны в {len(rows)} трейсов")
 ```
 
-`ragas_eval.py` уже настроен на `RUN_FILE = ".local/run-hybrid-v1.json"` — нажми Run.
-Затем поставь `RUN_FILE = ".local/run-dense-v1.json"` и запусти снова.
+`ragas_eval.ipynb` уже настроен на `RUN_FILE = ".local/run-hybrid-v1.json"` — нажми ▶ Run All.
+Затем поставь `RUN_FILE = ".local/run-dense-v1.json"` и нажми ▶ Run All снова.
 
 Каждый запуск — несколько десятков вызовов судьи; считай стоимость по usage/биллингу провайдера: этот RAGAS-wrapper не трейсит судью автоматически. Не включай автозахват текстов/аргументов ради стоимости; настрой безопасный callback отдельно. В UI у каждого трейса появляются оценки `faithfulness`, `answer_relevancy`, `llm_context_precision_without_reference`, `context_recall`; на странице прогона — средние. Сравни два прогона: обычно гибрид с реранкером поднимает context precision и faithfulness; relevancy почти не меняется. Запиши числа.
 
@@ -365,7 +365,7 @@ def judge(question: str, answer: str, reference: str) -> Verdict:
 
 
 if __name__ == "__main__":
-    here = Path(__file__).resolve().parent
+    here = labkit.ROOT / "day5-evals"  # не Path(__file__): этот файл — ноутбук, в ячейке Jupyter __file__ не определён
     path = here / RUN_FILE
     rows = [r for r in json.loads(path.read_text(encoding="utf-8")) if r.get("reference")]
     manual_path = here / ".local" / "manual_labels.json"
@@ -385,7 +385,7 @@ if __name__ == "__main__":
         print(f"\nсогласие судьи с ручной разметкой: {agree}/{total}")
 ```
 
-Перед запуском разметь сам пять ответов из `.local/run-hybrid-v1.json` по той же шкале 0–2 в `.local/manual_labels.json` (`{"вопрос": 2, ...}`), не глядя на судью. Запуск: нажми Run на `judge.py` (уже настроен на `.local/run-hybrid-v1.json`). Согласие 4/5 — только smoke-проверка рубрики: пяти случаев недостаточно для доверия на всём трафике. Нужна независимая стратифицированная выборка (ошибки, отказы, языки), матрица ошибок и интервальная оценка; повторно не оценивай рубрику только на примерах её настройки. При 2/5 разбери расхождения и рубрику, не подгоняй эталон. Число согласия — в отчёт: это и есть предварительная калибровка.
+Перед запуском разметь сам пять ответов из `.local/run-hybrid-v1.json` по той же шкале 0–2 в `.local/manual_labels.json` (`{"вопрос": 2, ...}`), не глядя на судью. Запуск: открой `judge.ipynb` в VS Code и нажми ▶ Run All (уже настроен на `.local/run-hybrid-v1.json`). Согласие 4/5 — только smoke-проверка рубрики: пяти случаев недостаточно для доверия на всём трафике. Нужна независимая стратифицированная выборка (ошибки, отказы, языки), матрица ошибок и интервальная оценка; повторно не оценивай рубрику только на примерах её настройки. При 2/5 разбери расхождения и рубрику, не подгоняй эталон. Число согласия — в отчёт: это и есть предварительная калибровка.
 
 ## Шаг 6. Гейт для CI без LLM
 

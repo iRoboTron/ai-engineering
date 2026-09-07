@@ -28,6 +28,12 @@ def main():
             if any(part in {".venv", ".local"} for part in path.parts):
                 continue
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for path in (ROOT / "labs").rglob("*.ipynb"):
+        if any(part in {".venv", ".local"} for part in path.parts):
+            continue
+        nb = json.loads(path.read_text(encoding="utf-8"))
+        code = "\n".join("".join(cell["source"]) + "\n" for cell in nb["cells"] if cell["cell_type"] == "code")
+        ast.parse(code, filename=str(path))
     manifest = json.loads((BOOKS / "vendor/manifest.json").read_text())
     for name, meta in manifest.items():
         if hashlib.sha256((BOOKS / "vendor" / name).read_bytes()).hexdigest() != meta["sha256"]:
