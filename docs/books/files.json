@@ -182,6 +182,10 @@
         "title": "Приложение A. Банк вопросов собеседования"
       },
       {
+        "file": "debug-drill.md",
+        "title": "Самостоятельные debug-drill"
+      },
+      {
         "file": "glossary.md",
         "title": "Глоссарий"
       }

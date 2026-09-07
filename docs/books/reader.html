@@ -7,11 +7,13 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>ИИ-инженер: читалка</title>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.0/github-markdown-light.min.css">
+    <script src="vendor/marked.min.js"></script>
+    <script src="vendor/mermaid.min.js"></script>
+    <link rel="stylesheet" href="vendor/github-dark.min.css">
+    <script src="vendor/highlight.min.js"></script>
+    <link rel="stylesheet" href="vendor/github-markdown-light.min.css">
+    <script src="vendor/purify.min.js"></script>
+    <script src="reader-links.js?v=20260907-audit-fixes"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html { scroll-behavior: smooth; }
@@ -515,7 +517,7 @@
 <script>
 marked.setOptions({ breaks: true, gfm: true });
 
-const ASSET_VERSION = '20260906-ai-week';
+const ASSET_VERSION = '20260907-audit-fixes';
 
 const COURSE_NAMES = {
     "01-map-and-llm-basics": "День 1: Карта и LLM-основы",
@@ -537,12 +539,7 @@ const COURSE_ALIASES = {
     "portfolio-interview": "07-portfolio-interview", "interview": "07-portfolio-interview", "day7": "07-portfolio-interview",
 };
 
-const COURSE_PARTS = [
-    { id: 'base', from: 1, to: 7, title: 'Часть 1. База DevOps' },
-    { id: 'advanced', from: 8, to: 14, title: 'Часть 2. Инфраструктура и Kubernetes' },
-    { id: 'security', from: 15, to: 21, title: 'Часть 3. Безопасность' },
-    { id: 'misc', from: 22, to: 99, title: 'Часть 4. Прочее' },
-];
+const COURSE_PARTS = [{ id: 'week1', from: 1, to: 7, title: 'Неделя 1. Практический трек' }];
 
 const contentEl = document.getElementById('content');
 const loadingMsg = document.getElementById('loadingMsg');
@@ -702,7 +699,7 @@ async function loadBook(course, preferredFile, replaceUrl = false) {
     if (!files.length) throw new Error('В книге нет файлов');
     const targetFile = preferredFile && files.includes(preferredFile) ? preferredFile : (files.includes('book.md') ? 'book.md' : files[0]);
     const bookTitle = itemTitle(items.find(item => itemFile(item) === 'book.md') || items[0]);
-    document.title = `${compactTitle(bookTitle)} — DevOps Course`;
+    document.title = `${compactTitle(bookTitle)} — ИИ-инженер`;
     const part = getPart(course);
     breadcrumbPart.textContent = part.title;
     breadcrumbPart.href = part.id ? `index.html#${part.id}` : 'index.html';
@@ -728,7 +725,7 @@ async function loadBook(course, preferredFile, replaceUrl = false) {
     loadingMsg.hidden = true;
     enhanceCodeBlocks();
     highlightCode();
-    renderMermaid();
+    await renderMermaid();
     currentSections = buildSectionMeta(course, items);
     setupInitialScroll(course, targetFile, replaceUrl);
     updateCurrentSection(true);
@@ -784,7 +781,7 @@ function renderFullBook(course, items, loaded, bookTitle) {
         const label = `${sectionKind(filename)} · ${filename}`;
         const body = error
             ? `<div class="error-msg">Не удалось загрузить ${escapeHtml(filename)}: ${escapeHtml(error.message)}</div>`
-            : marked.parse(text);
+            : DOMPurify.sanitize(marked.parse(text));
         return `
             <section class="book-section" id="${escapeHtml(id)}" data-file="${escapeHtml(filename)}" data-title="${escapeHtml(itemTitle(item))}">
                 <div class="section-label">${escapeHtml(label)}</div>
@@ -794,6 +791,20 @@ function renderFullBook(course, items, loaded, bookTitle) {
     }).join('');
 
     contentEl.innerHTML = hero + toc + sections;
+    contentEl.querySelectorAll('.book-section').forEach(section => {
+        const filename = section.dataset.file;
+        const seen = new Map();
+        section.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
+            const base = heading.id || ReaderLinks.slug(heading.textContent);
+            const count = seen.get(base) || 0;
+            seen.set(base, count + 1);
+            heading.id = `${section.id}--${base}${count ? '-' + count : ''}`;
+        });
+        section.querySelectorAll('a[href]').forEach(link => {
+            const route = ReaderLinks.resolve(link.getAttribute('href'), course, filename, courses);
+            if (route) link.setAttribute('href', route);
+        });
+    });
 }
 function renderTocGroup(title, items) {
     if (!items.length) return '';
@@ -919,7 +930,7 @@ function highlightCode() {
         hljs.highlightElement(block);
     });
 }
-function renderMermaid() {
+async function renderMermaid() {
     contentEl.querySelectorAll('pre code.language-mermaid').forEach(block => {
         const pre = block.parentElement;
         const div = document.createElement('div');
@@ -928,7 +939,7 @@ function renderMermaid() {
         pre.replaceWith(div);
     });
     mermaid.initialize({ startOnLoad: false, theme: 'default', flowchart: { curve: 'basis' } });
-    mermaid.run({ querySelector: '.mermaid' });
+    await mermaid.run({ querySelector: '.mermaid' });
 }
 async function copyText(text) {
     if (navigator.clipboard && window.isSecureContext) {

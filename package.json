@@ -1,0 +1,7 @@
+{
+  "name": "ai-engineering-reader-checks",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {"test:reader": "playwright test"},
+  "devDependencies": {"@playwright/test": "1.63.0"}
+}

@@ -41,17 +41,21 @@ flowchart LR
 
 Что нужно до старта (15 минут):
 
-- Python 3.12 и `venv`. Ключ OpenRouter — тот же, что в настройках web-agent, или новый с `openrouter.ai/keys`.
+- Python 3.12 и `venv`. Ключ OpenRouter — отдельный учебный с ограниченным бюджетом, не продовый; создай его на с `openrouter.ai/keys`.
 - Доступ к OpenRouter из РФ блокируется по IP (ты это видел 3 сентября: `403 Access denied by security policy`). Решение то же, что для Hermes: socks5-прокси через LXC 106 на kl-pc. Библиотеке `httpx`, на которой работает `openai`, нужен extra `socks`.
 - Аккаунт на hh.ru с пустым или старым резюме — сегодня появится новое.
 
 ```bash
-mkdir -p ~/proj/ai-labs/day1-llm-basics && cd ~/proj/ai-labs
+# Из корня репозитория курса; отличающиеся существующие файлы не перезаписываются.
+python3 scripts/install_labs.py --dest ~/proj/ai-labs
+cd ~/proj/ai-labs
 git init -q
 python3 -m venv .venv && source .venv/bin/activate
-pip install -q "openai>=1.50" "pydantic>=2.7" "httpx[socks]"
-printf '%s\n' .venv/ __pycache__/ out/ .env > .gitignore
+python -m pip install --require-hashes -r requirements.txt
+cd day1-llm-basics
 ```
+
+Установщик копирует готовые исходники, публичные fixtures и безопасный .gitignore: .env, .local/, corpus/, chroma/, out/ и локальные виртуальные окружения не публикуются. Не заменяй существующий .gitignore вслепую. Все команды Python дня 1 выполняй из day1-llm-basics; ниже разбирается уже установленный код.
 
 Переменные окружения — в файле `~/proj/ai-labs/.env` (он в `.gitignore`). Содержимое:
 
@@ -67,10 +71,10 @@ export https_proxy="$HTTPS_PROXY"
 
 ```bash
 source ~/proj/ai-labs/.env
-curl -s -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
+curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
 ```
 
-Ожидаемо `200`. Если `403` — прокси не применился: `curl` читает `https_proxy` в нижнем регистре, `httpx` — в любом, поэтому в файле заданы оба. Модель по умолчанию взята из конфига web-agent; любую другую подставишь через `LLM_MODEL`, список — `openrouter.ai/models`.
+Ожидаемо `200`. При `403` проверь условия доступа провайдера и сетевой маршрут; код сам по себе не доказывает, что прокси не применился. `curl` читает `https_proxy` в нижнем регистре, `httpx` — в любом, поэтому в файле заданы оба. Модель по умолчанию взята из конфига web-agent; любую другую подставишь через `LLM_MODEL`, список — `openrouter.ai/models`.
 
 ## Шаг 1. Двадцать вакансий (30 минут, без кода)
 
@@ -137,6 +141,8 @@ def ask(prompt: str, temperature: float):
             {"role": "user", "content": prompt},
         ],
     )
+    if not r.choices or not r.choices[0].message.content or r.usage is None:
+        raise RuntimeError("нет текста/usage: проверь отказ, лимит ответа и возможности провайдера")
     return r.choices[0].message.content.strip(), r.usage
 
 
@@ -156,7 +162,7 @@ for s in (
     print(f"{r.usage.prompt_tokens:4d} токенов | {len(s):3d} символов | {s}")
 ```
 
-Что должно получиться: при `temperature=0.0` три ответа одинаковые или почти одинаковые, при `1.0` — заметно разные. Число токенов у русской фразы больше при сопоставимой длине в символах; разница зависит от токенизатора модели, поэтому запиши обе цифры в `results.md`. В `prompt_tokens` входят служебные токены разметки сообщения — это нормально.
+Что должно получиться: при `temperature=0.0` три ответа одинаковые или почти одинаковые, при `1.0` — заметно разные. Числа токенов для RU и EN могут различаться в любую сторону; соотношение зависит от токенизатора модели, поэтому запиши обе цифры в `results.md`. В `prompt_tokens` входят служебные токены разметки сообщения — это нормально.
 
 ## Шаг 4. Structured output: вакансия → объект
 
@@ -169,20 +175,31 @@ import re
 import sys
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from typing import Literal
+from openai import BadRequestError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from client import make_client, MODEL
 
 
 class Vacancy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str = Field(description="Название позиции как в тексте")
-    company: str = Field(description="Компания или 'unknown'")
-    seniority: str = Field(description="junior | middle | senior | unknown")
-    must_have: list[str] = Field(description="Обязательные требования, по 2-4 слова каждое")
-    nice_to_have: list[str] = Field(default_factory=list)
-    salary_min: int | None = Field(default=None, description="Нижняя граница в рублях, если указана")
-    salary_max: int | None = None
-    remote: bool | None = Field(default=None, description="Есть ли удалёнка")
+    company: str = Field(description="Компания или unknown")
+    seniority: Literal["junior", "middle", "senior", "unknown"]
+    must_have: list[str]
+    nice_to_have: list[str]
+    salary_min: int | None = Field(description="Нижняя граница в рублях или null")
+    salary_max: int | None = Field(description="Верхняя граница в рублях или null")
+    remote: bool | None
+
+    @model_validator(mode="after")
+    def check_salary(self):
+        if any(v is not None and v < 0 for v in (self.salary_min, self.salary_max)):
+            raise ValueError("зарплата не может быть отрицательной")
+        if self.salary_min is not None and self.salary_max is not None and self.salary_min > self.salary_max:
+            raise ValueError("нижняя граница зарплаты выше верхней")
+        return self
 
 
 SYSTEM = "Ты извлекаешь структурированные данные из текста вакансии. Отвечай только JSON по схеме, без пояснений и без markdown."
@@ -197,24 +214,32 @@ def extract(client, text: str) -> Vacancy:
             model=MODEL,
             temperature=0,
             max_tokens=600,
-            response_format={"type": "json_schema", "json_schema": {"name": "vacancy", "schema": schema}},
+            response_format={"type": "json_schema", "json_schema": {"name": "vacancy", "strict": True, "schema": schema}},
             messages=messages,
         )
         mode = "json_schema"
-    except Exception as exc:  # провайдер или модель не поддерживают json_schema
+    except BadRequestError as exc:
+        # Не маскируем auth/rate limit/сетевые ошибки и произвольные 400.
+        if not any(word in str(exc).lower() for word in ("json_schema", "response_format", "structured output")):
+            raise
         print(f"  json_schema не прошёл ({type(exc).__name__}), запасной путь через промпт", file=sys.stderr)
         messages[0]["content"] += "\nСхема JSON:\n" + json.dumps(schema, ensure_ascii=False)
         r = client.chat.completions.create(model=MODEL, temperature=0, max_tokens=600, messages=messages)
         mode = "prompt+validate"
+    if not r.choices or not r.choices[0].message.content or r.choices[0].finish_reason == "length":
+        raise RuntimeError("structured output отсутствует/оборван; отказ или лимит не считается успешным JSON")
     raw = FENCE.sub("", r.choices[0].message.content.strip())
-    vacancy = Vacancy.model_validate_json(raw)  # ValidationError здесь — повод для ретрая с текстом ошибки
-    print(f"  режим: {mode}, токены in={r.usage.prompt_tokens} out={r.usage.completion_tokens}")
+    vacancy = Vacancy.model_validate_json(raw)  # ValidationError не замалчивается и не публикуется как успех
+    print(f"  режим: {mode}, usage={r.usage}")
     return vacancy
 
 
 if __name__ == "__main__":
     client = make_client()
-    out = Path("out"); out.mkdir(exist_ok=True)
+    if len(sys.argv) < 2:
+        raise SystemExit("передай пути к публичным текстам вакансий")
+    out = Path(__file__).resolve().parent / "out"
+    out.mkdir(exist_ok=True)
     for path in map(Path, sys.argv[1:]):
         print(f"\n{path.name}")
         v = extract(client, path.read_text(encoding="utf-8"))
@@ -255,9 +280,11 @@ for event in stream:
     print(delta, end="", flush=True)
 
 t1 = time.perf_counter()
+if first is None:
+    raise RuntimeError("стрим не содержал текста: проверь отказ и finish_reason")
 print(f"\n\nTTFT: {first - t0:.2f}s | всего: {t1 - t0:.2f}s", end="")
 if usage and first:
-    print(f" | out={usage.completion_tokens} → {usage.completion_tokens / (t1 - first):.1f} tok/s")
+    print(f" | out={usage.completion_tokens} → {max(0, usage.completion_tokens - 1) / max(t1 - first, 1e-9):.1f} tok/s")
 else:
     print(" | usage в стриме не пришёл — провайдер не поддерживает include_usage")
 ```
@@ -311,7 +338,7 @@ for label, mid in (("основная", MODEL), ("дешёвая", os.getenv("LL
         continue
     p_in, p_out, ctx = price(models, mid)
     print(f"\n{label}: {mid} (контекст {ctx})")
-    print(f"  вход ${p_in * 1e6:.2f}/1M, выход ${p_out * 1e6:.2f}/1M, выход дороже входа в {p_out / p_in:.1f}x")
+    print(f"  вход ${p_in * 1e6:.2f}/1M, выход ${p_out * 1e6:.2f}/1M, отношение выход/вход: {p_out / p_in if p_in else None}")
     print(f"  один RAG-запрос: ${IN_TOKENS * p_in + OUT_TOKENS * p_out:.5f}")
     print(f"  {REQ_PER_MONTH} запросов в месяц: ${monthly_cost(p_in, p_out):.2f}")
 ```
@@ -382,11 +409,11 @@ print(answer.choices[0].message.content)
 Выводы в три строки: что удивило, что пойдёт в резюме, что проверить в день 5.
 ```
 
-Коммит и публикация: `git add -A && git commit -m "day1: LLM basics — usage, structured output, streaming, cost, retries"`, репозиторий на GitHub `iRoboTron/ai-labs` публичный.
+Перед публикацией из `~/proj/ai-labs`: `git add day1-llm-basics/*.py day1-llm-basics/results.md .gitignore`, затем `git diff --cached`. Проверь отсутствие ключей, приватного текста и URL с credentials; только после проверки коммит и push. Репозиторий портфолио публичный, .env и out не добавляй.
 
 ## Если не получилось
 
-- **`403` от OpenRouter** — прокси не применился. Проверь `echo $HTTPS_PROXY`, что LXC 106 жив (`curl --socks5 192.168.0.106:1080 https://openrouter.ai/api/v1/models -o /dev/null -w '%{http_code}'`), и что стоит `httpx[socks]`, иначе httpx молча игнорирует socks-прокси с ошибкой про схему.
+- **`403` от OpenRouter** — прокси не применился. Проверь `echo $HTTPS_PROXY`, что LXC 106 жив (`curl --socks5 192.168.0.106:1080 https://openrouter.ai/api/v1/models -o /dev/null -w '%{http_code}'`), и что стоит `httpx[socks]`, иначе создание SOCKS-транспорта завершается ошибкой отсутствующей зависимости.
 - **`402 Payment Required`** — кончился баланс OpenRouter; пополни или переключись на бесплатную модель (в id есть `:free`), понимая, что у них лимиты и очередь.
 - **`400` на `response_format`** — модель не поддерживает json_schema; скрипт сам уходит на запасной путь. Хочешь настоящий json_schema — смени модель.
 - **`ValidationError`** в шаге 4 — модель вернула JSON не по схеме или обернула в текст. Посмотри `raw`, добавь в системный промпт «без markdown» (уже есть) или сделай второй запрос с текстом ошибки — это и есть ретрай с валидацией.
@@ -404,7 +431,7 @@ print(answer.choices[0].message.content)
 ## Что проверить
 
 - `career/vacancies-2026-09.md` содержит 20 строк и подсчёт требований; три полных текста лежат в `career/vacancies/`.
-- В `~/proj/ai-labs/day1-llm-basics/` шесть файлов: `client.py`, пять скриптов `01`–`05`, плюс `results.md`; репозиторий закоммичен и запушен.
+- В `~/proj/ai-labs/day1-llm-basics/` семь файлов: `client.py`, пять скриптов `01`–`05`, плюс `results.md`; репозиторий закоммичен и запушен.
 - `02_structured.py` вернул валидные объекты для всех трёх вакансий; в отчёте указан режим.
 - `results.md` содержит числа: токены RU/EN, TTFT, tok/s, коэффициент выход/вход, две месячные стоимости.
 - `05_retry.py 0.3` показал растущие паузы, а несуществующая модель упала без ретраев.

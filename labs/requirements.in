@@ -1,0 +1,26 @@
+# API-compatible laboratory line, NOT a production security recommendation.
+# Full transitive versions/hashes are recorded in requirements.txt.
+openai>=2,<3
+pydantic>=2.11,<3
+httpx[socks]==0.28.1
+chromadb>=1.0,<2
+langchain-text-splitters>=1,<2
+rank-bm25==0.2.2
+snowballstemmer>=3,<4
+sentence-transformers>=5,<6
+torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.10.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
+pypdf>=6,<7
+python-docx==1.2.0
+beautifulsoup4>=4.13,<5
+psycopg[binary]>=3.2,<4
+pgvector>=0.4,<0.6
+numpy>=2,<3
+langgraph==1.0.10
+langchain-openai==1.0.3
+langchain-mcp-adapters==0.1.14
+mcp==1.20.0
+langfuse==3.14.6
+ragas==0.3.9
+pandas>=2.2,<3
+pytest>=8,<9
+tabulate>=0.9,<1

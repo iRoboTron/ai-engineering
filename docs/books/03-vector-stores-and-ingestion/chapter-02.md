@@ -2,7 +2,7 @@
 
 ## Результат
 
-Папка `~/proj/ai-labs/day3-pgvector/`: PostgreSQL с pgvector в Docker на homelab, те же чанки и векторы, что вчера в Chroma, HNSW и полнотекстовый индексы, гибридный поиск одним SQL-запросом, изоляция tenant через row-level security и таблица `results.md` — recall@k и латентность Chroma против pgvector на том же golden-наборе. Плюс план миграции web-agent с оценкой трудозатрат. Вчера ты доказал, что умеешь измерять поиск; сегодня — что умеешь выбирать и эксплуатировать хранилище.
+Папка `~/proj/ai-labs/day3-pgvector/`: PostgreSQL с pgvector в Docker на homelab, те же чанки и векторы, что вчера в Chroma, HNSW и полнотекстовый индексы, гибридный поиск одним SQL-запросом, изоляция tenant через row-level security и таблица `results.md` — Hit@k, MRR@5 и p50/p95 Chroma против pgvector на том же golden-наборе. Плюс план миграции web-agent с оценкой трудозатрат. Вчера ты доказал, что умеешь измерять поиск; сегодня — что умеешь выбирать и эксплуатировать хранилище.
 
 ## Карта лабы
 
@@ -39,11 +39,10 @@ flowchart LR
 
 ## Подготовка
 
-Нужны результаты дня 2: локальная Chroma с коллекцией `chunks_openai`, файлы `chunks.jsonl` и `golden.jsonl`. Postgres поднимаем отдельным контейнером на нестандартном порту, чтобы не задеть другие базы на машине.
+Нужны результаты дня 2: снимок `day2-rag-eval/.local/chunks_openai/` и `fixtures/golden.jsonl`. Готовые файлы установлены командой `python3 scripts/install_labs.py --dest ~/proj/ai-labs` из корня курса (существующие отличающиеся файлы не перезаписываются). Postgres поднимаем отдельным контейнером на нестандартном порту, чтобы не задеть другие базы на машине.
 
 ```bash
 cd ~/proj/ai-labs && source .venv/bin/activate && source .env
-pip install -q "psycopg[binary]" pgvector numpy
 mkdir -p day3-pgvector && cd day3-pgvector
 ```
 
@@ -54,13 +53,17 @@ mkdir -p day3-pgvector && cd day3-pgvector
 services:
   pg:
     image: pgvector/pgvector:pg17
-    container_name: ai-labs-pg
     environment:
-      POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag
+      POSTGRES_USER: rag_admin
+      POSTGRES_PASSWORD: "${PG_ADMIN_PASSWORD:?set PG_ADMIN_PASSWORD}"
       POSTGRES_DB: rag
     ports:
       - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_admin -d rag"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     volumes:
       - pgdata:/var/lib/postgresql/data
 volumes:
@@ -68,10 +71,16 @@ volumes:
 ```
 
 ```bash
-docker compose up -d
-export PG_DSN="postgresql://rag:rag@127.0.0.1:5433/rag"
-docker compose exec pg psql -U rag -d rag -c "CREATE EXTENSION IF NOT EXISTS vector; SELECT extversion FROM pg_extension WHERE extname='vector';"
+export PG_ADMIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
+export PG_APP_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
+# Сохрани переменные в локальном .env вне Git для последующих сессий.
+export PG_ADMIN_DSN="postgresql://rag_admin:$PG_ADMIN_PASSWORD@127.0.0.1:5433/rag"
+export PG_DSN="postgresql://rag_app:$PG_APP_PASSWORD@127.0.0.1:5433/rag"
+docker compose up -d --wait
+docker compose exec pg psql -U rag_admin -d rag -c "CREATE EXTENSION IF NOT EXISTS vector; SELECT extversion FROM pg_extension WHERE extname='vector';"
 ```
+
+Команды рассчитаны на новую учебную БД. Существующий volume сохраняет старого пользователя и пароль: не удаляй его ради инструкции, используй отдельное имя Compose-проекта и свободный порт. Пароли выше генерируются один раз, не при каждом запуске; сохрани их в исключённом из Git `.env` с правами `chmod 600 .env`. Административный DSN нельзя использовать в приложении.
 
 Ожидаемо версия расширения `0.8.x` или новее. Запиши её — итеративный скан из шага 5 требует не ниже 0.8.0.
 
@@ -79,98 +88,131 @@ docker compose exec pg psql -U rag -d rag -c "CREATE EXTENSION IF NOT EXISTS vec
 
 ```sql
 -- ~/proj/ai-labs/day3-pgvector/schema.sql
+\set ON_ERROR_STOP on
 CREATE EXTENSION IF NOT EXISTS vector;
-
-DROP TABLE IF EXISTS chunks;
-CREATE TABLE chunks (
+DO $roles$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rag_app') THEN
+        CREATE ROLE rag_app LOGIN NOSUPERUSER NOBYPASSRLS;
+    END IF;
+END
+$roles$;
+ALTER ROLE rag_app WITH LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD :'app_password';
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO rag_app;
+CREATE TABLE IF NOT EXISTS chunks (
     id          text PRIMARY KEY,
-    tenant_id   int  NOT NULL,
+    tenant_id   int NOT NULL,
     filename    text NOT NULL,
-    chunk_index int  NOT NULL,
+    chunk_index int NOT NULL,
     text        text NOT NULL,
     embedding   vector(1536) NOT NULL,
     tsv         tsvector GENERATED ALWAYS AS (to_tsvector('russian', text)) STORED
 );
-
--- индексы создадим ПОСЛЕ загрузки (шаг 4): так виден эффект и быстрее вставка
--- изоляция tenant: политика применяется даже к владельцу таблицы (FORCE)
+CREATE TABLE IF NOT EXISTS lab_snapshot (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    config jsonb NOT NULL
+);
 ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON chunks;
 CREATE POLICY tenant_isolation ON chunks
-    USING (tenant_id = current_setting('app.tenant_id', true)::int);
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::int);
+REVOKE ALL ON chunks, lab_snapshot FROM PUBLIC;
+GRANT SELECT ON chunks, lab_snapshot TO rag_app;
 ```
 
 ```bash
-docker compose exec -T pg psql -U rag -d rag -v ON_ERROR_STOP=1 < schema.sql
+docker compose exec -T pg psql -U rag_admin -d rag -v ON_ERROR_STOP=1 -v app_password="$PG_APP_PASSWORD" < schema.sql
 ```
 
-Параметр `current_setting('app.tenant_id', true)` возвращает NULL, если tenant не задан, — тогда политика не пропускает ни одной строки. Это намеренно: код, забывший задать tenant, получает пусто, а не чужие данные.
+Никогда не заданный GUC возвращает NULL, а после `RESET` — пустую строку. `NULLIF(..., '')` покрывает оба случая: нет tenant — нет строк. `FORCE` подчиняет политике владельца, но **не суперпользователя и не BYPASSRLS**. Все запросы приложения и тесты выполняются как `rag_app`. RLS защищает от забытого фильтра, но не от клиента с произвольным SQL: tenant устанавливает доверенный сервер после аутентификации, не модель и не пользователь запроса.
+
+Основание: [PostgreSQL RLS](https://www.postgresql.org/docs/17/ddl-rowsecurity.html), [роль POSTGRES_USER в Docker](https://hub.docker.com/_/postgres).
 
 ## Шаг 3. Загрузка из Chroma
 
-Векторы уже посчитаны вчера — платить за эмбеддинги второй раз не нужно. Половину документов отдадим tenant 1, половину tenant 2, чтобы было что изолировать.
+Векторы уже посчитаны вчера — платить за эмбеддинги второй раз не нужно. Разбиение на tenant 1 и 2 уже записано в снимке дня 2; переносим его без изменений. Схема лабы рассчитана на 1536 измерений; для иной модели нужна отдельная таблица с её размерностью, а не смешивание векторов.
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/load.py
+import argparse
 import os
 import sys
+from pathlib import Path
 
-import chromadb
-import numpy as np
-import psycopg
-from pgvector.psycopg import register_vector
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+from common import load_config, snapshot_path
 
-DSN = os.environ["PG_DSN"]
-CHROMA_PATH = os.path.expanduser("~/proj/ai-labs/day2-rag-eval/chroma")
-COLLECTION = sys.argv[1] if len(sys.argv) > 1 else "chunks_openai"
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("collection", nargs="?", default="chunks_openai")
+    ap.add_argument("--replace-lab-data", action="store_true")
+    a = ap.parse_args()
+    config = load_config(a.collection)
+    if config["dimension"] != 1536:
+        raise SystemExit("эта учебная схема vector(1536); для другой модели нужна отдельная схема")
+    import chromadb
+    import numpy as np
+    import psycopg
+    from pgvector.psycopg import register_vector
+    from psycopg.types.json import Jsonb
+    col = chromadb.PersistentClient(path=str(snapshot_path(a.collection) / "chroma")).get_collection(a.collection)
+    data = col.get(include=["embeddings", "documents", "metadatas"])
+    rows = [(cid, m["tenant_id"], m["filename"], m["chunk_index"], doc, np.asarray(emb, dtype=np.float32))
+            for cid, doc, m, emb in zip(data["ids"], data["documents"], data["metadatas"], data["embeddings"])]
+    if not rows:
+        raise SystemExit("снимок пуст")
+    with psycopg.connect(os.environ["PG_ADMIN_DSN"]) as conn:
+        register_vector(conn)
+        if conn.execute("SELECT current_database(), current_user").fetchone() != ("rag", "rag_admin"):
+            raise RuntimeError("загрузчик разрешён только в учебной БД rag от rag_admin")
+        if conn.execute("SELECT count(*) FROM chunks").fetchone()[0] and not a.replace_lab_data:
+            raise RuntimeError("таблица непуста; проверь DSN и явно разреши --replace-lab-data")
+        # Только учебный admin; атомарная замена снимка, политика RLS не отключается.
+        conn.execute("TRUNCATE chunks, lab_snapshot")
+        with conn.cursor() as cur:
+            cur.executemany("INSERT INTO chunks (id, tenant_id, filename, chunk_index, text, embedding) VALUES (%s,%s,%s,%s,%s,%s)", rows)
+        conn.execute("INSERT INTO lab_snapshot (config) VALUES (%s)", (Jsonb(config),))
+        for tenant, count in conn.execute("SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id ORDER BY 1"):
+            print(f"tenant {tenant}: чанков {count}")
+    print(f"загружен снимок {config['dataset_hash']}, строк {len(rows)}")
 
-col = chromadb.PersistentClient(path=CHROMA_PATH).get_collection(COLLECTION)
-data = col.get(include=["embeddings", "documents", "metadatas"])
-files = sorted({m["filename"] for m in data["metadatas"]})
-tenant_of = {f: 1 if i < len(files) / 2 else 2 for i, f in enumerate(files)}  # две «компании»
-
-rows = [
-    (cid, tenant_of[m["filename"]], m["filename"], m["chunk_index"], doc, np.asarray(emb, dtype=np.float32))
-    for cid, doc, m, emb in zip(data["ids"], data["documents"], data["metadatas"], data["embeddings"])
-]
-
-with psycopg.connect(DSN) as conn:
-    register_vector(conn)
-    with conn.cursor() as cur:
-        cur.execute("SET app.tenant_id = '0'")  # владелец под FORCE RLS тоже фильтруется; для загрузки политика обходится ниже
-        cur.execute("ALTER TABLE chunks DISABLE ROW LEVEL SECURITY")
-        cur.executemany(
-            "INSERT INTO chunks (id, tenant_id, filename, chunk_index, text, embedding) VALUES (%s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text, embedding = EXCLUDED.embedding",
-            rows,
-        )
-        cur.execute("ALTER TABLE chunks ENABLE ROW LEVEL SECURITY")
-        cur.execute("SELECT tenant_id, count(*), count(DISTINCT filename) FROM chunks GROUP BY tenant_id ORDER BY 1")
-        for tenant, n_chunks, n_docs in cur.fetchall():
-            print(f"tenant {tenant}: документов {n_docs}, чанков {n_chunks}")
-    conn.commit()
-print(f"размерность: {len(rows[0][5])}, всего строк: {len(rows)}")
+if __name__ == "__main__":
+    main()
 ```
 
-Запуск: `python load.py`. Отключение RLS на время загрузки — осознанное действие администратора в одной транзакции; в проде загрузчик работает от роли с `BYPASSRLS` или под tenant. Вставка — upsert по детерминированному `id`, как в web-agent.
+Запуск: `python load.py`. Политика не отключается: административная роль обходит её только при загрузке. Для повторной замены **учебной** таблицы нужен явный `--replace-lab-data`; в проде применяй версионирование/backfill, а не TRUNCATE. Идентификаторы и tenant берутся из исходного снимка, поэтому сравнение остаётся сопоставимым.
 
 ## Шаг 4. Индексы и EXPLAIN: увидеть разницу
 
-Сначала запрос без индекса, потом с HNSW. На нескольких сотнях строк планировщик выберет последовательный скан даже при наличии индекса — это правильно с его стороны; для демонстрации индекс включаем принудительно.
+```sql
+-- ~/proj/ai-labs/day3-pgvector/indexes.sql
+CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS chunks_tsv_gin ON chunks USING gin (tsv);
+ANALYZE chunks;
+```
+
+```bash
+docker compose exec -T pg psql -U rag_admin -d rag -v ON_ERROR_STOP=1 < indexes.sql
+```
+
+Индексы создаёт администратор после загрузки. EXPLAIN выполняет прикладная роль: сначала принудительный Seq Scan, затем HNSW. На нескольких сотнях строк планировщик выберет последовательный скан даже при наличии индекса — это правильно с его стороны; для демонстрации индекс включаем принудительно.
 
 ```sql
 -- ~/proj/ai-labs/day3-pgvector/explain.sql
 -- один вектор запроса берём прямо из таблицы, чтобы не тащить его из Python
 SET app.tenant_id = '1';
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
 \set qvec 'SELECT embedding FROM chunks WHERE tenant_id = 1 ORDER BY id LIMIT 1'
 
 EXPLAIN (ANALYZE, BUFFERS)
 SELECT id, filename, 1 - (embedding <=> (:qvec)) AS score
 FROM chunks ORDER BY embedding <=> (:qvec) LIMIT 5;
 
-CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
-CREATE INDEX IF NOT EXISTS chunks_tsv_gin ON chunks USING gin (tsv);
-ANALYZE chunks;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
 
 SET enable_seqscan = off;   -- только для демонстрации на малой таблице
 SET hnsw.ef_search = 40;
@@ -184,7 +226,7 @@ SELECT count(*) AS rows_without_iterative FROM (
   SELECT id FROM chunks WHERE filename = (SELECT filename FROM chunks WHERE tenant_id = 1 ORDER BY id DESC LIMIT 1)
   ORDER BY embedding <=> (:qvec) LIMIT 5) t;
 
-SET hnsw.iterative_scan = relaxed_order;
+SET hnsw.iterative_scan = strict_order;
 SELECT count(*) AS rows_with_iterative FROM (
   SELECT id FROM chunks WHERE filename = (SELECT filename FROM chunks WHERE tenant_id = 1 ORDER BY id DESC LIMIT 1)
   ORDER BY embedding <=> (:qvec) LIMIT 5) t;
@@ -192,10 +234,10 @@ RESET enable_seqscan;
 ```
 
 ```bash
-docker compose exec -T pg psql -U rag -d rag -v ON_ERROR_STOP=1 < explain.sql
+docker compose exec -T -e PGPASSWORD="$PG_APP_PASSWORD" pg psql -h 127.0.0.1 -U rag_app -d rag -v ON_ERROR_STOP=1 < explain.sql
 ```
 
-Что смотреть: в первом плане `Seq Scan` и `Sort`, во втором — `Index Scan using chunks_embedding_hnsw`; время выполнения обоих запиши. В двух последних запросах сравни число строк: без итеративного скана фильтр по одному файлу может дать меньше пяти строк, с ним — ровно пять. Если разницы нет — корпус мал и первые пять соседей и так из нужного файла; смени файл в подзапросе на редкий.
+Что смотреть: в первом плане `Seq Scan` и `Sort`, во втором — `Index Scan using chunks_embedding_hnsw`; время выполнения обоих запиши. В двух последних запросах сравни число строк: без итеративного скана фильтр по одному файлу может дать меньше пяти строк, с ним строк может стать больше, но не больше числа подходящих чанков и лимитов обхода. На малом fixture эффект может отсутствовать: это корректный результат, а не причина подгонять эксперимент. Масштабируемость на четырёх документах не доказывается.
 
 ## Шаг 5. Три ретривера одним адаптером
 
@@ -203,20 +245,17 @@ docker compose exec -T pg psql -U rag -d rag -v ON_ERROR_STOP=1 < explain.sql
 # ~/proj/ai-labs/day3-pgvector/pgstore.py
 import os
 import sys
+from pathlib import Path
 
-import numpy as np
-import psycopg
-from pgvector.psycopg import register_vector
-
-sys.path.insert(0, os.path.expanduser("~/proj/ai-labs/day2-rag-eval"))
-from embed import Embedder  # noqa: E402  — тот же эмбеддер запроса, что вчера
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+from embed import Embedder
 
 DENSE_SQL = """
-SELECT id, filename, chunk_index, text, 1 - (embedding <=> %(v)s) AS score
+SELECT id, tenant_id, filename, chunk_index, text, 1 - (embedding <=> %(v)s) AS score
 FROM chunks ORDER BY embedding <=> %(v)s LIMIT %(k)s"""
 
 FTS_SQL = """
-SELECT id, filename, chunk_index, text, ts_rank_cd(tsv, q) AS score
+SELECT id, tenant_id, filename, chunk_index, text, ts_rank_cd(tsv, q) AS score
 FROM chunks, plainto_tsquery('russian', %(q)s) q
 WHERE tsv @@ q ORDER BY score DESC LIMIT %(k)s"""
 
@@ -229,29 +268,39 @@ WITH dense AS (
     FROM chunks, plainto_tsquery('russian', %(q)s) q
     WHERE tsv @@ q ORDER BY ts_rank_cd(tsv, q) DESC LIMIT %(cand)s
 )
-SELECT c.id, c.filename, c.chunk_index, c.text,
+SELECT c.id, c.tenant_id, c.filename, c.chunk_index, c.text,
        COALESCE(1.0 / (60 + dense.r), 0) + COALESCE(1.0 / (60 + fts.r), 0) AS score
 FROM chunks c
 LEFT JOIN dense ON dense.id = c.id
-LEFT JOIN fts   ON fts.id   = c.id
+LEFT JOIN fts ON fts.id = c.id
 WHERE dense.id IS NOT NULL OR fts.id IS NOT NULL
 ORDER BY score DESC LIMIT %(k)s"""
 
-
 class PgStore:
     def __init__(self, tenant_id: int, embedder: Embedder):
-        self.conn = psycopg.connect(os.environ["PG_DSN"])
+        if type(tenant_id) is not int or tenant_id <= 0:
+            raise ValueError("tenant_id должен быть положительным int")
+        import psycopg
+        from pgvector.psycopg import register_vector
+        self.conn = psycopg.connect(os.environ["PG_DSN"], autocommit=True)
         register_vector(self.conn)
-        self.conn.execute("SET app.tenant_id = %s", (str(tenant_id),))
-        self.conn.execute("SET hnsw.ef_search = 40")
-        self.embedder = embedder
+        flags = self.conn.execute("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
+        if any(flags):
+            self.conn.close()
+            raise RuntimeError("PG_DSN приложения не может использовать SUPERUSER/BYPASSRLS")
+        self.tenant_id, self.embedder = tenant_id, embedder
 
-    def _rows(self, sql: str, params: dict) -> list[dict]:
-        cur = self.conn.execute(sql, params)
-        cols = [d.name for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    def _rows(self, sql: str, params=None) -> list[dict]:
+        with self.conn.transaction():
+            self.conn.execute("SELECT set_config('app.tenant_id', %s, true)", (str(self.tenant_id),))
+            self.conn.execute("SET LOCAL hnsw.ef_search = 100")
+            self.conn.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+            cur = self.conn.execute(sql, params)
+            cols = [d.name for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    def _vec(self, q: str) -> np.ndarray:
+    def _vec(self, q: str):
+        import numpy as np
         return np.asarray(self.embedder.embed_query(q), dtype=np.float32)
 
     def dense(self, q: str, k: int) -> list[dict]:
@@ -262,71 +311,150 @@ class PgStore:
 
     def hybrid(self, q: str, k: int, cand: int = 20) -> list[dict]:
         return self._rows(HYBRID_SQL, {"v": self._vec(q), "q": q, "k": k, "cand": cand})
+
+    def visible_rows(self) -> list[dict]:
+        return self._rows("SELECT id, tenant_id, filename, chunk_index, text FROM chunks ORDER BY id")
+
+    def snapshot_config(self) -> dict:
+        return self._rows("SELECT config FROM lab_snapshot")[0]["config"]
+
+    def close(self) -> None:
+        self.conn.close()
 ```
 
-Обрати внимание: в SQL нет `WHERE tenant_id` — фильтр добавляет политика RLS по `app.tenant_id`, заданному на соединении. Проверка: `python -c "from pgstore import PgStore; from embed import Embedder; s=PgStore(1, Embedder('openrouter','openai/text-embedding-3-small')); print([r['filename'] for r in s.hybrid('на каком порту слушает ollama', 3)])"` из папки `day3-pgvector` с `PG_DSN` в окружении.
+В SQL поиска нет `WHERE tenant_id`: его добавляет RLS, но только для прикладной роли. `set_config(..., true)` устанавливает контекст **внутри каждой транзакции**, после выхода контекст сброшен; исключение тоже завершает транзакцию. Это безопаснее session SET для пула. Psycopg 3 не поддерживает параметры в SQL `SET`, поэтому здесь используется функция: [официальное объяснение server-side binding](https://www.psycopg.org/psycopg3/docs/basic/from_pg2.html#server-side-binding).
 
 ## Шаг 6. Оценка и сравнение с Chroma
 
-Переиспользуем `evaluate` из вчерашнего `eval.py` — метрики и формат таблицы должны совпадать, чтобы сравнение было честным. Golden-набор общий, но теперь документы разделены между двумя tenant: оцениваем каждый tenant по его вопросам.
+Переиспользуем `evaluate` из вчерашнего `eval.py` — метрики и формат таблицы должны совпадать, чтобы сравнение было честным. Golden-набор и query-векторы общие. Для каждого tenant обе системы получают одинаковые документы, вопросы и фильтры; код сверяет снимок и видимые строки до измерения.
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/eval_pg.py
-import json
-import os
+import argparse
 import sys
+import time
+from pathlib import Path
 
-sys.path.insert(0, os.path.expanduser("~/proj/ai-labs/day2-rag-eval"))
-from embed import Embedder  # noqa: E402
-from eval import evaluate   # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+from common import golden_for_rows, load_config, load_golden, load_rows
+from eval import evaluate
 
-from pgstore import PgStore
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("collection", nargs="?", default="chunks_openai")
+    ap.add_argument("--golden")
+    a = ap.parse_args()
+    cfg, rows = load_config(a.collection), load_rows(a.collection)
+    golden = golden_for_rows(load_golden(a.golden), rows, require_all=True)
+    from embed import Embedder
+    from retrievers import Store
+    from pgstore import PgStore
+    embedder = Embedder(cfg["embedder"], cfg["model"])
+    t0 = time.perf_counter()
+    for g in golden:
+        embedder.embed_query(g["q"])
+    print(f"query embeddings, вне поиска: {time.perf_counter() - t0:.2f} s")
+    print("| tenant | retriever | Hit@5 | MRR@5 | p50 ms | p95 ms |")
+    print("|---|---|---|---|---|---|")
+    for tenant in sorted({r["tenant_id"] for r in rows}):
+        subset_rows = [r for r in rows if r["tenant_id"] == tenant]
+        subset = golden_for_rows(golden, subset_rows)
+        if not subset:
+            continue
+        chroma = Store(a.collection, embedder, tenant_id=tenant)
+        pg = PgStore(tenant, embedder)
+        try:
+            if pg.snapshot_config() != cfg:
+                raise RuntimeError("Postgres и Chroma содержат разные снимки; повтори контролируемую загрузку")
+            actual = {r["id"]: r for r in pg.visible_rows()}
+            expected = {r["id"]: r for r in subset_rows}
+            if actual != expected:
+                raise RuntimeError("разные документы/tenant: сравнение остановлено")
+            for name, fn in (("Chroma dense", chroma.dense), ("pgvector dense", pg.dense),
+                             ("Chroma BM25", chroma.bm25_search), ("Postgres FTS", pg.fts),
+                             ("Chroma hybrid", chroma.hybrid), ("Postgres hybrid", pg.hybrid)):
+                r = evaluate(name, fn, subset)
+                print(f"| {tenant} ({len(subset)} q) | {name} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} |")
+        finally:
+            pg.close()
 
-golden = [json.loads(line) for line in open(os.path.expanduser("~/proj/ai-labs/day2-rag-eval/golden.jsonl"), encoding="utf-8") if line.strip()]
-embedder = Embedder("openrouter", "openai/text-embedding-3-small")
-
-print("| tenant | retriever | recall@1 | recall@3 | recall@5 | MRR | латентность, мс |")
-print("|---|---|---|---|---|---|---|")
-for tenant in (1, 2):
-    store = PgStore(tenant, embedder)
-    docs_of_tenant = {r[0] for r in store.conn.execute("SELECT DISTINCT filename FROM chunks").fetchall()}
-    subset = [g for g in golden if g["doc"] in docs_of_tenant]
-    if not subset:
-        continue
-    for name, fn in (("dense", store.dense), ("fts", store.fts), ("hybrid RRF", store.hybrid)):
-        r = evaluate(name, fn, subset)
-        print(f"| {tenant} ({len(subset)} q) | {r['retriever']} | {r['recall@1']:.2f} | {r['recall@3']:.2f} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.0f} |")
+if __name__ == "__main__":
+    main()
 ```
 
-Запуск: `python eval_pg.py`. Dense в pgvector должен давать те же попадания, что dense в Chroma (те же векторы, косинус) — если нет, ищи разницу в метрике расстояния или в `ef_search`. Полнотекстовый поиск Postgres против вчерашнего BM25 со стеммингом — разные алгоритмы, разница ожидаема в обе стороны; запиши, какая.
+Запуск: `python eval_pg.py`. Dense сравнивается на одинаковом подкорпусе. ANN-индексы могут давать разные попадания: сравни с exact baseline и параметрами обхода, не объявляй совпадение обязательным. Полнотекстовый поиск Postgres против вчерашнего BM25 со стеммингом — разные алгоритмы, разница ожидаема в обе стороны; запиши, какая.
 
 ## Шаг 7. RLS: доказать, что утечки нет
 
 ```sql
 -- ~/proj/ai-labs/day3-pgvector/rls_demo.sql
+\set ON_ERROR_STOP on
+DO $check$
+BEGIN
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) THEN
+        RAISE EXCEPTION 'тест должен выполняться прикладной ролью';
+    END IF;
+END
+$check$;
 SET app.tenant_id = '1';
-SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id;          -- только tenant 1
+SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id;
+DO $check$
+BEGIN
+    IF NOT EXISTS (SELECT FROM chunks) OR EXISTS (SELECT FROM chunks WHERE tenant_id <> 1) THEN
+        RAISE EXCEPTION 'изоляция tenant 1 не работает или данные не загружены';
+    END IF;
+END
+$check$;
 SET app.tenant_id = '2';
-SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id;          -- только tenant 2
+SELECT tenant_id, count(*) FROM chunks GROUP BY tenant_id;
+DO $check$
+BEGIN
+    IF NOT EXISTS (SELECT FROM chunks) OR EXISTS (SELECT FROM chunks WHERE tenant_id <> 2) THEN
+        RAISE EXCEPTION 'изоляция tenant 2 не работает или данные не загружены';
+    END IF;
+END
+$check$;
 RESET app.tenant_id;
-SELECT count(*) AS visible_without_tenant FROM chunks;               -- 0: забытый tenant = пусто, не утечка
--- попытка обойти фильтром в запросе:
-SET app.tenant_id = '1';
-SELECT count(*) AS leak_attempt FROM chunks WHERE tenant_id = 2;     -- 0
+SELECT count(*) AS visible_without_tenant FROM chunks;
+DO $check$
+BEGIN
+    IF EXISTS (SELECT FROM chunks) THEN
+        RAISE EXCEPTION 'RESET оставил доступ к данным';
+    END IF;
+END
+$check$;
+BEGIN;
+SELECT set_config('app.tenant_id', '1', true);
+SELECT count(*) AS leak_attempt FROM chunks WHERE tenant_id = 2;
+DO $check$
+BEGIN
+    IF EXISTS (SELECT FROM chunks WHERE tenant_id = 2) THEN
+        RAISE EXCEPTION 'обход фильтра';
+    END IF;
+END
+$check$;
+COMMIT;
+DO $check$
+BEGIN
+    IF EXISTS (SELECT FROM chunks) THEN
+        RAISE EXCEPTION 'tenant остался после транзакции';
+    END IF;
+END
+$check$;
 ```
 
 ```bash
-docker compose exec -T pg psql -U rag -d rag -v ON_ERROR_STOP=1 < rls_demo.sql
+docker compose exec -T -e PGPASSWORD="$PG_APP_PASSWORD" pg psql -h 127.0.0.1 -U rag_app -d rag -v ON_ERROR_STOP=1 < rls_demo.sql
 ```
 
-Четыре результата — в отчёт. Это ответ на вопрос «как гарантируете изоляцию», который можно показать, а не рассказать.
+Четыре результата и успешные SQL-assertions — в отчёт. Дополнительно проверяется сброс контекста после транзакции, а не только RESET. Это ответ на вопрос «как гарантируете изоляцию», который можно показать, а не рассказать.
 
 ## Шаг 8. Парсинг с таблицами: Docling против pypdf (30 минут, по желанию)
 
 Если в корпусе есть PDF с таблицей — сравни, что извлекают `pypdf` (как в web-agent) и Docling. Установка Docling тяжёлая (модели раскладки, сотни мегабайт), делай только при запасе времени.
 
 ```bash
-pip install -q docling
+# Docling — отдельное необязательное окружение и зафиксированная версия, не обновляй основное venv.
 python -c "from docling.document_converter import DocumentConverter; import sys; print(DocumentConverter().convert(sys.argv[1]).document.export_to_markdown()[:3000])" corpus-sample.pdf
 python -c "from pypdf import PdfReader; import sys; print((PdfReader(sys.argv[1]).pages[0].extract_text() or '')[:3000])" corpus-sample.pdf
 ```
@@ -339,15 +467,15 @@ python -c "from pypdf import PdfReader; import sys; print((PdfReader(sys.argv[1]
 # День 3 — pgvector рядом с Chroma (дата, pgvector x.y.z, чанков N)
 
 ## Качество и латентность (тот же golden-набор)
-| хранилище | retriever | recall@5 | MRR | латентность, мс |
-| Chroma (день 2) | dense | … | … | … |
+| tenant + хранилище | retriever | Hit@5 | MRR@5 | p50/p95, мс |
+| Chroma (тот же tenant, текущий прогон) | dense | … | … | … |
 | pgvector | dense | … | … | … |
 | pgvector | fts (ts_rank_cd) | … | … | … |
 | pgvector | hybrid RRF в SQL | … | … | … |
 
 ## EXPLAIN
-- без индекса: Seq Scan, … мс; с HNSW: Index Scan, … мс
-- фильтр + LIMIT 5: без iterative_scan … строк, с relaxed_order … строк
+- принудительный Seq Scan, … мс; с HNSW: Index Scan, … мс
+- фильтр + LIMIT 5: без iterative_scan … строк, с strict_order … строк
 
 ## RLS
 - tenant 1 видит …, tenant 2 видит …, без tenant 0, попытка WHERE tenant_id=2 → 0
@@ -355,20 +483,20 @@ python -c "from pypdf import PdfReader; import sys; print((PdfReader(sys.argv[1]
 ## План миграции web-agent Chroma → pgvector
 1. Таблица chunks в существующем Postgres web-agent (tenant_id = site_id), RLS, HNSW, GIN. Alembic-миграция.
 2. Двойная запись в doc-parser: reindex пишет в Chroma и в Postgres (флаг). Backfill существующих коллекций скриптом.
-3. retriever.py: режим dense | hybrid по настройке сайта; SET app.tenant_id на соединении из пула.
+3. retriever.py: режим dense | hybrid по настройке сайта; set_config(..., true) в транзакции каждого запроса, только от rag_app.
 4. Сравнение на golden-наборе tenant ksm; переключение чтения на pgvector; неделя наблюдения; удаление Chroma из compose.
 5. Оценка: … часов; риски: долгая сборка HNSW на большом tenant (строить CONCURRENTLY), размер БД (+ N ГБ), пул соединений и SET на сессии (PgBouncer в transaction mode требует SET LOCAL в транзакции).
 
 ## Выводы
 ```
 
-Коммит: `git add -A && git commit -m "day3: pgvector — schema, HNSW, hybrid SQL, RLS, eval vs Chroma"`, push.
+Из `~/proj/ai-labs`: `git add day3-pgvector/*.py day3-pgvector/*.sql day3-pgvector/docker-compose.yml day3-pgvector/results.md`, затем `git diff --cached`. Проверь отсутствие DSN, паролей и приватного текста; после проверки — коммит и push.
 
 ## Если не получилось
 
 - **`psycopg` не видит `vector`** — забыт `register_vector(conn)` после подключения; без него numpy-массив не сериализуется.
 - **`current_setting` падает `unrecognized configuration parameter`** — используй двухсоставное имя `app.tenant_id` (с точкой) и `current_setting('app.tenant_id', true)`.
-- **Все запросы возвращают 0 строк** — RLS работает, а `app.tenant_id` не задан на этом соединении; `SET` действует на сессию, а не на базу.
+- **Все запросы возвращают 0 строк** — проверь прикладную роль, загруженный tenant и вызов set_config внутри той же транзакции. Не заменяй PG_DSN административным ради появления строк.
 - **Индекс не используется в EXPLAIN** — таблица мала; `SET enable_seqscan = off` только для демонстрации; на проде планировщик переключится сам с ростом.
 - **`iterative_scan` — unrecognized** — pgvector ниже 0.8; обнови образ `pgvector/pgvector:pg17`.
 - **Полнотекст не находит очевидное** — конфигурация `russian` должна стоять и в `to_tsvector`, и в `plainto_tsquery`; проверь `SELECT to_tsvector('russian', 'абонементы')`.
@@ -376,16 +504,16 @@ python -c "from pypdf import PdfReader; import sys; print((PdfReader(sys.argv[1]
 
 ## Практика
 
-1. **Qdrant за 20 минут**: `docker run -d -p 6333:6333 qdrant/qdrant`, `pip install qdrant-client`, создай коллекцию с `size=1536, distance=Cosine`, залей те же векторы с payload `tenant_id`, поставь payload-индекс на `tenant_id` и сравни латентность dense-поиска с фильтром. В отчёт — третья строка сравнения хранилищ.
+1. **Qdrant за 20 минут**: `docker run -d -p 127.0.0.1:6333:6333 qdrant/qdrant`, клиент из зафиксированного окружения, создай коллекцию с `size=1536, distance=Cosine`, залей только синтетические fixture-векторы с payload `tenant_id`, поставь payload-индекс на `tenant_id` и сравни латентность dense-поиска с фильтром. В отчёт — третья строка сравнения хранилищ. Self-hosted Qdrant по умолчанию без аутентификации: localhost-bind обязателен; для удалённого доступа сначала настрой `QDRANT__SERVICE__API_KEY`, TLS и сетевые ограничения по [документации Qdrant](https://qdrant.tech/documentation/security/).
 2. **halfvec**: добавь колонку `embedding_half halfvec(1536)`, заполни `embedding::halfvec`, построй HNSW и сравни размер индексов через `pg_relation_size` и recall@5. Это готовый аргумент «в два раза меньше памяти без потери качества» — или опровержение на твоих данных.
 3. **Контроль расхождения**: напиши SQL или скрипт, который сравнивает число чанков на документ между таблицей метаданных и векторным хранилищем и печатает расхождения. Это тот контроль, которого не хватило при миграции web-agent.
 
 ## Что проверить
 
-- Контейнер `ai-labs-pg` работает, расширение `vector` версии 0.8 или новее.
+- Сервис `docker compose ps pg` готов, расширение `vector` версии 0.8 или новее.
 - `load.py` загрузил все чанки дня 2, разделив на два tenant; размерность 1536.
 - `explain.sql` показал Seq Scan до индекса и Index Scan после; записаны оба времени и эффект итеративного скана.
-- `eval_pg.py` выдал таблицу; dense pgvector совпадает с dense Chroma по recall@5 в пределах одного попадания, иначе причина найдена.
+- `eval_pg.py` выдал таблицу; Chroma и pgvector проверены на одинаковых tenant-снимках; расхождения Hit@5 разобраны, p50/p95 измерены после прогрева.
 - `rls_demo.sql`: tenant видит только свои строки, без tenant — 0, попытка `WHERE tenant_id = 2` — 0.
 - В `results.md` есть план миграции web-agent из пяти пунктов с оценкой часов и рисками.
 - Коммит запушен в `iRoboTron/ai-labs`.
