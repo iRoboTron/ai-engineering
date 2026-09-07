@@ -1,11 +1,13 @@
 # ~/proj/ai-labs/day7-interview/mock.py
+"""Случайные вопросы из банка приложения A. Отвечаешь вслух, суть ответа показывается только после твоей попытки."""
 import random
 import re
-import sys
 from pathlib import Path
 
+# --- НАСТРОЙКИ ---
+N = 60      # сколько вопросов задать за один прогон
+
 BANK = Path.home() / "Documents/lessons/ai-engineering/docs/books/07-portfolio-interview/appendix-a.md"
-n = int(sys.argv[1]) if len(sys.argv) > 1 else 60
 
 items = []
 section = ""
@@ -16,7 +18,7 @@ for line in BANK.read_text(encoding="utf-8").splitlines():
     if m:
         items.append((section, m.group(1), m.group(2)))
 
-picked = random.sample(items, min(n, len(items)))
+picked = random.sample(items, min(N, len(items)))
 scores = []
 for i, (section, q, a) in enumerate(picked, 1):
     input(f"\n[{i}/{len(picked)}] ({section})\n{q}\n— отвечай вслух, Enter когда закончишь ")

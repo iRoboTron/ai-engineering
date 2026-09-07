@@ -125,13 +125,15 @@ pgvector с RLS вместо Chroma (план из 5 шагов), condense quest
 
 ```python
 # ~/proj/ai-labs/day7-interview/mock.py
+"""Случайные вопросы из банка приложения A. Отвечаешь вслух, суть ответа показывается только после твоей попытки."""
 import random
 import re
-import sys
 from pathlib import Path
 
+# --- НАСТРОЙКИ ---
+N = 60      # сколько вопросов задать за один прогон
+
 BANK = Path.home() / "Documents/lessons/ai-engineering/docs/books/07-portfolio-interview/appendix-a.md"
-n = int(sys.argv[1]) if len(sys.argv) > 1 else 60
 
 items = []
 section = ""
@@ -142,7 +144,7 @@ for line in BANK.read_text(encoding="utf-8").splitlines():
     if m:
         items.append((section, m.group(1), m.group(2)))
 
-picked = random.sample(items, min(n, len(items)))
+picked = random.sample(items, min(N, len(items)))
 scores = []
 for i, (section, q, a) in enumerate(picked, 1):
     input(f"\n[{i}/{len(picked)}] ({section})\n{q}\n— отвечай вслух, Enter когда закончишь ")
@@ -158,7 +160,7 @@ for sec, q in weak:
     print(f"  - [{sec}] {q}")
 ```
 
-Запуск: `python mock.py 60`, отвечай вслух, честно ставь оценки. Итог и список слабых вопросов — в `career/mock-1.md`. Ниже 70 % по какому-то дню — этот день в план недели 2 первым. Повтори mock через два дня.
+Запуск: нажми Run на `mock.py` (60 вопросов по умолчанию — поменяй `N`, если нужно другое число), отвечай вслух, честно ставь оценки. Итог и список слабых вопросов — в `career/mock-1.md`. Ниже 70 % по какому-то дню — этот день в план недели 2 первым. Повтори mock через два дня.
 
 ## Шаг 7. Отклики и таблица (30 минут)
 

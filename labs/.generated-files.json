@@ -1,4 +1,7 @@
 {
+  "labkit.py": "docs/books/01-map-and-llm-basics/chapter-02.md",
+  ".vscode/settings.json": "docs/books/01-map-and-llm-basics/chapter-02.md",
+  ".env.example": "docs/books/01-map-and-llm-basics/chapter-02.md",
   "day1-llm-basics/client.py": "docs/books/01-map-and-llm-basics/chapter-02.md",
   "day1-llm-basics/01_basics.py": "docs/books/01-map-and-llm-basics/chapter-02.md",
   "day1-llm-basics/02_structured.py": "docs/books/01-map-and-llm-basics/chapter-02.md",

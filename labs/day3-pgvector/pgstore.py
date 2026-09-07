@@ -1,9 +1,7 @@
 # ~/proj/ai-labs/day3-pgvector/pgstore.py
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+"""То же самое, что Store из дня 2 (dense/BM25/hybrid), но SQL-запросами к Postgres вместо Chroma."""
+import labkit
+labkit.use_day("day2-rag-eval")
 from embed import Embedder
 
 DENSE_SQL = """
@@ -33,12 +31,14 @@ WHERE dense.id IS NOT NULL OR fts.id IS NOT NULL
 ORDER BY score DESC LIMIT %(k)s"""
 
 class PgStore:
+    """Подключение от имени rag_app (не admin!) — тогда работает RLS и tenant нельзя обойти."""
+
     def __init__(self, tenant_id: int, embedder: Embedder):
         if type(tenant_id) is not int or tenant_id <= 0:
             raise ValueError("tenant_id должен быть положительным int")
         import psycopg
         from pgvector.psycopg import register_vector
-        self.conn = psycopg.connect(os.environ["PG_DSN"], autocommit=True)
+        self.conn = psycopg.connect(labkit.env("PG_DSN", required=True), autocommit=True)
         register_vector(self.conn)
         flags = self.conn.execute("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
         if any(flags):
@@ -47,6 +47,7 @@ class PgStore:
         self.tenant_id, self.embedder = tenant_id, embedder
 
     def _rows(self, sql: str, params=None) -> list[dict]:
+        """Каждый запрос — своя транзакция: tenant выставляется и автоматически сбрасывается вместе с ней."""
         with self.conn.transaction():
             self.conn.execute("SELECT set_config('app.tenant_id', %s, true)", (str(self.tenant_id),))
             self.conn.execute("SET LOCAL hnsw.ef_search = 100")
@@ -69,6 +70,7 @@ class PgStore:
         return self._rows(HYBRID_SQL, {"v": self._vec(q), "q": q, "k": k, "cand": cand})
 
     def visible_rows(self) -> list[dict]:
+        """Все строки, видимые этой ролью прямо сейчас — используется для сверки со снимком Chroma."""
         return self._rows("SELECT id, tenant_id, filename, chunk_index, text FROM chunks ORDER BY id")
 
     def snapshot_config(self) -> dict:

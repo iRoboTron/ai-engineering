@@ -36,9 +36,12 @@ def collect(books=BOOKS):
                        and n.value.value is Ellipsis for n in ast.walk(tree)):
                     raise ValueError(f"Incomplete executable example: {name}")
             if language == "json":
-                for line in body.splitlines():
-                    if line.strip():
-                        json.loads(line)
+                try:
+                    json.loads(body)          # a normal pretty-printed JSON document (e.g. settings.json)
+                except json.JSONDecodeError:
+                    for line in body.splitlines():   # fall back to JSON Lines (e.g. attacks.jsonl)
+                        if line.strip():
+                            json.loads(line)
             if name in result:
                 raise ValueError(f"Duplicate lab file: {name}")
             result[name] = (body.rstrip() + "\n", str(source.relative_to(ROOT)))

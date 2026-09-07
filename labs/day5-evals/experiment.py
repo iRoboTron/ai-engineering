@@ -1,21 +1,25 @@
 # ~/proj/ai-labs/day5-evals/experiment.py
+"""Прогоняет весь golden-набор через rag_pipeline и записывает трейсы как один именованный прогон в Langfuse."""
 import hashlib
 import json
-import os
 import re
-import sys
-from pathlib import Path
 
+import labkit
 from langfuse import get_client
 from rag_pipeline import HERE, rag
 from common import load_golden
 
 OUTPUT = HERE / ".local"
 
+# --- НАСТРОЙКИ: сделай два прогона по очереди, каждый со своим именем ---
+MODE = "hybrid_rerank"          # "dense" или "hybrid_rerank" — какой ретривер дня 2 использовать
+RUN_NAME = "hybrid-v1"          # имя прогона в Langfuse; для второго прохода — MODE="dense", RUN_NAME="dense-v1"
+EXPORT_SYNTHETIC = True         # явное подтверждение: набор вопросов учебный, публиковать в Langfuse можно
+
 
 def ensure_dataset() -> str:
-    if os.getenv("EVAL_EXPORT_SYNTHETIC") != "1":
-        raise RuntimeError("Экспорт текстов требует EVAL_EXPORT_SYNTHETIC=1; сначала проверь, что набор учебный")
+    if not EXPORT_SYNTHETIC:
+        raise RuntimeError("Экспорт текстов требует EXPORT_SYNTHETIC = True; сначала проверь, что набор учебный")
     golden = load_golden()
     serialized = json.dumps(golden, ensure_ascii=False, sort_keys=True)
     name = "golden-rag-" + hashlib.sha256(serialized.encode()).hexdigest()[:12]
@@ -48,15 +52,13 @@ def run(dataset: str, mode: str, name: str) -> list[dict]:
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "hybrid_rerank"
-    name = sys.argv[2] if len(sys.argv) > 2 else f"{mode}-v1"
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-        raise ValueError("Имя прогона: только буквы, цифры, _ и -")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", RUN_NAME):
+        raise ValueError("RUN_NAME: только буквы, цифры, _ и -")
     dataset = ensure_dataset()
-    rows = run(dataset, mode, name)
+    rows = run(dataset, MODE, RUN_NAME)
     if not rows:
         raise RuntimeError("Пустой датасет")
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    path = OUTPUT / f"run-{name}.json"
+    path = OUTPUT / f"run-{RUN_NAME}.json"
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"{dataset}: {len(rows)} вопросов; локальный отчёт {path}")

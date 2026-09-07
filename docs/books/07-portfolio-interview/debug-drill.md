@@ -97,12 +97,9 @@ docker compose exec -T -e PGPASSWORD="$PG_APP_PASSWORD" pg psql -h 127.0.0.1 -U 
 После сборки снимка локальной моделью команда загрузки в Postgres завершается сообщением
 `эта учебная схема vector(1536); для другой модели нужна отдельная схема`:
 
-```bash
-cd ~/proj/ai-labs/day2-rag-eval
-python index.py --collection chunks_e5 --embedder local --model intfloat/multilingual-e5-small
-cd ../day3-pgvector
-python load.py chunks_e5
-```
+В `day2-rag-eval/index.py` поставь `COLLECTION = "chunks_e5"`, `EMBEDDER = "local"`,
+`MODEL = "intfloat/multilingual-e5-small"`, нажми Run. Затем в `day3-pgvector/load.py`
+поставь `COLLECTION = "chunks_e5"` и нажми Run.
 
 Если не хочешь скачивать модель, воспроизведи диагноз без запуска: открой
 `~/proj/ai-labs/day2-rag-eval/.local/chunks_openai/config.json` и сравни поле `dimension` с типом колонки

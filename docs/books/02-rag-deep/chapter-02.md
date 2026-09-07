@@ -75,26 +75,31 @@ ls ../fixtures/corpus
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/common.py
+"""Общие функции: где лежит снимок индекса, как читать golden-вопросы. Импортируется другими файлами дня."""
 import hashlib
 import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-FIXTURES = ROOT.parent / "fixtures"
+ROOT = Path(__file__).resolve().parent          # папка day2-rag-eval, не зависит от того, откуда запущен скрипт
+FIXTURES = ROOT.parent / "fixtures"              # публичные учебные документы курса
 
 def snapshot_path(collection: str) -> Path:
+    """Папка одного снимка индекса: .local/<имя коллекции>/."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{2,63}", collection):
         raise ValueError("collection: 3–64 буквы, цифры, дефис или подчёркивание")
     return ROOT / ".local" / collection
 
 def load_config(collection: str) -> dict:
+    """Настройки, с которыми был построен снимок: модель эмбеддингов, размер чанка и т.д."""
     return json.loads((snapshot_path(collection) / "config.json").read_text(encoding="utf-8"))
 
 def load_rows(collection: str) -> list[dict]:
+    """Все чанки снимка построчным JSON — по ним строится BM25 и разбираются промахи."""
     return [json.loads(line) for line in (snapshot_path(collection) / "chunks.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 
 def load_golden(path=None) -> list[dict]:
+    """Проверочные вопросы: q — вопрос, doc — где должен быть ответ, must — обязательная фраза."""
     source = Path(path) if path else FIXTURES / "golden.jsonl"
     rows = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not rows or any(not all(isinstance(r.get(k), str) and r[k].strip() for k in ("q", "doc", "must")) for r in rows):
@@ -102,6 +107,7 @@ def load_golden(path=None) -> list[dict]:
     return rows
 
 def tenant_map(filenames) -> dict[str, int]:
+    """Делит документы поровну между двумя учебными арендаторами (пригодится в дне 3)."""
     names = sorted(set(filenames))
     if len(names) < 2:
         raise ValueError("для сравнения tenant нужны минимум два документа")
@@ -109,10 +115,12 @@ def tenant_map(filenames) -> dict[str, int]:
     return {name: 1 if i < boundary else 2 for i, name in enumerate(names)}
 
 def dataset_hash(rows: list[dict]) -> str:
+    """Отпечаток набора чанков — чтобы проверить, что Chroma и Postgres содержат один и тот же снимок."""
     payload = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def golden_for_rows(golden: list[dict], rows: list[dict], require_all=False) -> list[dict]:
+    """Оставляет из golden только вопросы, чей документ реально есть в текущем снимке."""
     names = {r["filename"] for r in rows}
     missing = {g["doc"] for g in golden} - names
     if require_all and missing:
@@ -122,23 +130,24 @@ def golden_for_rows(golden: list[dict], rows: list[dict], require_all=False) -> 
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/parse.py
+"""Один файл → один текст. Каждый формат разбирается своей библиотекой, все они уже в requirements.txt."""
 from pathlib import Path
 
 def parse(path: Path) -> str:
     ext = path.suffix.lower()
-    if ext in {".md", ".txt"}:
+    if ext in {".md", ".txt"}:                              # уже текст, просто читаем
         return path.read_text(encoding="utf-8")
     if ext == ".pdf":
-        from pypdf import PdfReader
+        from pypdf import PdfReader                          # достаёт текстовый слой PDF
         return "\n\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
     if ext == ".docx":
-        from docx import Document
+        from docx import Document                            # python-docx: абзацы Word-документа
         return "\n\n".join(p.text for p in Document(str(path)).paragraphs if p.text.strip())
     if ext in {".html", ".htm"}:
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup                         # разбирает HTML в дерево тегов
         soup = BeautifulSoup(path.read_text(encoding="utf-8"), "html.parser")
         for node in soup(["script", "style", "nav", "footer", "header", "noscript"]):
-            node.decompose()
+            node.decompose()                                  # убираем не-контент перед извлечением текста
         return soup.get_text(separator="\n\n", strip=True)
     raise ValueError(f"неподдерживаемый формат: {ext}")
 ```
@@ -149,30 +158,32 @@ def parse(path: Path) -> str:
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/embed.py
-import os
+"""Превращает текст в вектор. Один класс, два источника: платный API или бесплатная модель на CPU."""
+import labkit
 from functools import lru_cache
 
 from openai import OpenAI
 
 
 class Embedder:
-    """kind='openrouter' — как в web-agent; kind='local' — sentence-transformers на CPU."""
+    """kind='openrouter' — платный API, как в web-agent; kind='local' — sentence-transformers на CPU, бесплатно."""
 
     def __init__(self, kind: str, model: str):
         self.kind, self.model = kind, model
         if kind == "openrouter":
             self.client = OpenAI(
-                base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-                api_key=os.environ["OPENROUTER_API_KEY"],
+                base_url=labkit.env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                api_key=labkit.env("OPENROUTER_API_KEY", required=True),
                 timeout=60,
                 max_retries=2,
             )
         else:
-            from sentence_transformers import SentenceTransformer
+            from sentence_transformers import SentenceTransformer   # тянет модель с Hugging Face при первом запуске
 
             self.st = SentenceTransformer(model, device="cpu")
 
     def _prefix(self, texts: list[str], role: str) -> list[str]:
+        """Некоторые модели просят приписать 'query:'/'passage:' перед текстом — иначе поиск хуже. Легко забыть, поэтому здесь."""
         name = self.model.lower()
         if "e5" in name:
             p = "query: " if role == "query" else "passage: "
@@ -183,21 +194,23 @@ class Embedder:
         return [p + t for t in texts]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Векторы для чанков документов — вызывается при индексации."""
         return self._embed(self._prefix(texts, "document"))
 
     def embed_query(self, text: str) -> list[float]:
+        """Вектор одного поискового запроса; результат кэшируется — один вопрос эмбеддится только раз."""
         return list(self._query_cached(text))
 
-    @lru_cache(maxsize=4096)
+    @lru_cache(maxsize=4096)                                  # повтор того же запроса не платит за эмбеддинг второй раз
     def _query_cached(self, text: str) -> tuple:
         return tuple(self._embed(self._prefix([text], "query"))[0])
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
         if self.kind == "openrouter":
             out: list[list[float]] = []
-            for s in range(0, len(texts), 64):
+            for s in range(0, len(texts), 64):                # пачками по 64, чтобы не упереться в лимит запроса
                 r = self.client.embeddings.create(model=self.model, input=texts[s : s + 64])
-                out.extend(d.embedding for d in sorted(r.data, key=lambda d: d.index))
+                out.extend(d.embedding for d in sorted(r.data, key=lambda d: d.index))   # ответ может прийти не по порядку
             return out
         return self.st.encode(texts, normalize_embeddings=True, batch_size=16, show_progress_bar=False).tolist()
 ```
@@ -208,65 +221,69 @@ class Embedder:
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/index.py
-import argparse
+"""Строит один снимок индекса: режет документы на чанки, считает векторы, кладёт в Chroma и в chunks.jsonl.
+Настройки — константы ниже, не аргументы командной строки: поменял значение, сохранил файл, нажал Run —
+получил новый снимок под новым именем. Старые снимки не трогает и не перезаписывает."""
 import json
-from pathlib import Path
 
+import labkit                          # noqa: F401  подключает .env и пути labkit.FIXTURES/labkit.ROOT
 from common import FIXTURES, dataset_hash, snapshot_path, tenant_map
 from parse import parse
 
+# --- НАСТРОЙКИ: поменяй и запусти снова, чтобы получить другой снимок для сравнения ---
+CORPUS = FIXTURES / "corpus"           # папка с документами; по умолчанию — учебные fixture курса
+COLLECTION = "chunks_openai"           # имя снимка: у каждого эксперимента своё, старое не стирается
+EMBEDDER = "openrouter"                # "openrouter" — платный API, "local" — бесплатная модель на CPU
+MODEL = "openai/text-embedding-3-small"    # модель эмбеддингов; для EMBEDDER="local" — например BAAI/bge-m3
+CHUNK_SIZE = 500                       # символов в одном чанке
+CHUNK_OVERLAP = 50                     # перекрытие между соседними чанками, чтобы не резать мысль пополам
+TITLE_PREFIX = False                   # True — дописывать имя файла перед текстом каждого чанка (шаг 7)
+
 SUPPORTED = {".md", ".txt", ".pdf", ".docx", ".html", ".htm"}
 
+
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", type=Path, default=FIXTURES / "corpus")
-    ap.add_argument("--collection", default="chunks_openai")
-    ap.add_argument("--embedder", default="openrouter", choices=["openrouter", "local"])
-    ap.add_argument("--model", default="openai/text-embedding-3-small")
-    ap.add_argument("--chunk-size", type=int, default=500)
-    ap.add_argument("--chunk-overlap", type=int, default=50)
-    ap.add_argument("--title-prefix", action="store_true")
-    a = ap.parse_args()
-    dest = snapshot_path(a.collection)
+    dest = snapshot_path(COLLECTION)
     if dest.exists():
-        raise SystemExit("снимок уже существует: выбери новое --collection, перезаписи нет")
-    if not a.corpus.is_dir():
+        raise SystemExit(f"снимок {COLLECTION} уже существует: смени COLLECTION вверху файла, перезаписи нет")
+    if not CORPUS.is_dir():
         raise SystemExit("каталог корпуса не существует")
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    splitter = RecursiveCharacterTextSplitter(chunk_size=a.chunk_size, chunk_overlap=a.chunk_overlap)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     rows = []
-    for path in sorted(a.corpus.rglob("*")):
+    for path in sorted(CORPUS.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in SUPPORTED:
             continue
-        filename = path.relative_to(a.corpus).as_posix()
+        filename = path.relative_to(CORPUS).as_posix()
         for i, chunk in enumerate(splitter.split_text(parse(path))):
             rows.append({"id": f"{filename}:{i}", "text": chunk, "filename": filename, "chunk_index": i})
     if not rows:
         raise SystemExit("не извлечено ни одного чанка")
-    tenants = tenant_map(r["filename"] for r in rows)
+    tenants = tenant_map(r["filename"] for r in rows)          # делит документы на двух учебных арендаторов (день 3)
     for row in rows:
         row["tenant_id"] = tenants[row["filename"]]
     from embed import Embedder
-    to_embed = [f"{r['filename']}\n{r['text']}" if a.title_prefix else r["text"] for r in rows]
-    vectors = Embedder(a.embedder, a.model).embed_documents(to_embed)
+    to_embed = [f"{r['filename']}\n{r['text']}" if TITLE_PREFIX else r["text"] for r in rows]
+    vectors = Embedder(EMBEDDER, MODEL).embed_documents(to_embed)
     if len(vectors) != len(rows):
         raise RuntimeError("число векторов не совпадает с числом чанков")
-    config = {"collection": a.collection, "embedder": a.embedder, "model": a.model,
-              "dimension": len(vectors[0]), "chunk_size": a.chunk_size,
-              "chunk_overlap": a.chunk_overlap, "title_prefix": a.title_prefix,
+    config = {"collection": COLLECTION, "embedder": EMBEDDER, "model": MODEL,
+              "dimension": len(vectors[0]), "chunk_size": CHUNK_SIZE,
+              "chunk_overlap": CHUNK_OVERLAP, "title_prefix": TITLE_PREFIX,
               "dataset_hash": dataset_hash(rows), "documents": len(tenants)}
     dest.mkdir(parents=True, exist_ok=False)
     import chromadb
-    client = chromadb.PersistentClient(path=str(dest / "chroma"))
-    col = client.create_collection(a.collection, metadata={"hnsw:space": "cosine"})
-    for s in range(0, len(rows), 500):
+    client = chromadb.PersistentClient(path=str(dest / "chroma"))     # локальная векторная база, файлы на диске
+    col = client.create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
+    for s in range(0, len(rows), 500):                         # пачками, чтобы не упереться в лимит одного add()
         batch = rows[s:s + 500]
         col.add(ids=[r["id"] for r in batch], documents=[r["text"] for r in batch],
                 embeddings=vectors[s:s + 500],
                 metadatas=[{k: v for k, v in r.items() if k not in {"id", "text"}} for r in batch])
     (dest / "chunks.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     (dest / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"снимок {a.collection}: документов {len(tenants)}, чанков {col.count()}, dim={config['dimension']}")
+    print(f"снимок {COLLECTION}: документов {len(tenants)}, чанков {col.count()}, dim={config['dimension']}")
+
 
 if __name__ == "__main__":
     main()
@@ -278,27 +295,30 @@ if __name__ == "__main__":
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/retrievers.py
+"""Четыре способа искать релевантные чанки. Store — единая точка входа, используется во всех днях."""
 import re
 from functools import lru_cache
 
 from common import load_config, load_rows, snapshot_path
 
-WORD = re.compile(r"\w+", re.UNICODE)
+WORD = re.compile(r"\w+", re.UNICODE)               # разбивает текст на слова для BM25
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=1)                                # модель стеммера грузится один раз на процесс
 def stemmer():
     import snowballstemmer
-    return snowballstemmer.stemmer("russian")
+    return snowballstemmer.stemmer("russian")        # приводит слова к основе: «нашёл»/«находит» → одна форма
 
 def tokenize(text: str) -> list[str]:
     return stemmer().stemWords(WORD.findall(text.lower()))
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=1)                                # реранкер тяжёлый — загружаем один раз, не на каждый вопрос
 def reranker():
     from sentence_transformers import CrossEncoder
     return CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=512, device="cpu")
 
 class Store:
+    """Один снимок индекса плюс BM25 поверх него. tenant_id=None — видно всё; иначе — только свой tenant (день 3)."""
+
     def __init__(self, collection: str, embedder, tenant_id: int | None = None):
         import chromadb
         from rank_bm25 import BM25Okapi
@@ -312,9 +332,10 @@ class Store:
             raise ValueError("нет документов для выбранного tenant")
         self.by_id = {r["id"]: r for r in rows}
         self.ids = list(self.by_id)
-        self.bm25 = BM25Okapi([tokenize(r["text"]) for r in rows])
+        self.bm25 = BM25Okapi([tokenize(r["text"]) for r in rows])   # индекс BM25 строится в памяти при старте
 
     def dense(self, q: str, k: int) -> list[dict]:
+        """Поиск по смыслу: вектор вопроса ближе всего к векторам нужных чанков."""
         args = {"query_embeddings": [self.embedder.embed_query(q)], "n_results": min(k, len(self.ids))}
         if self.tenant_id is not None:
             args["where"] = {"tenant_id": self.tenant_id}
@@ -322,11 +343,13 @@ class Store:
         return [self.by_id[i] for i in res["ids"][0]]
 
     def bm25_search(self, q: str, k: int) -> list[dict]:
+        """Поиск по словам: хорош для точных терминов, кодов, названий."""
         scores = self.bm25.get_scores(tokenize(q))
         top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
         return [self.by_id[self.ids[i]] for i in top if scores[i] > 0]
 
     def hybrid(self, q: str, k: int, candidates: int = 20, rrf_k: int = 60) -> list[dict]:
+        """Складывает dense и BM25 через RRF (reciprocal rank fusion): чем выше место в обоих списках, тем выше итог."""
         fused = {}
         for ranked in (self.dense(q, candidates), self.bm25_search(q, candidates)):
             for pos, r in enumerate(ranked, start=1):
@@ -334,6 +357,7 @@ class Store:
         return [self.by_id[i] for i in sorted(fused, key=fused.get, reverse=True)[:k]]
 
     def hybrid_rerank(self, q: str, k: int, candidates: int = 20) -> list[dict]:
+        """Берёт кандидатов из hybrid, затем модель-реранкер читает пары (вопрос, чанк) вместе и уточняет порядок."""
         cands = self.hybrid(q, candidates, candidates=candidates)
         if not cands:
             return []
@@ -350,16 +374,24 @@ class Store:
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/eval.py
-import argparse
+"""Прогоняет golden-вопросы через четыре ретривера и печатает таблицу Hit@k / MRR / латентность.
+COLLECTION внизу должен совпадать с тем, что ты только что построил в index.py."""
 import math
 import time
 from statistics import mean, median
 
+import labkit                          # noqa: F401  подключает .env
 from common import golden_for_rows, load_config, load_golden, load_rows
+
+# --- НАСТРОЙКИ ---
+COLLECTION = "chunks_openai"           # тот же снимок, что в index.py
+GOLDEN_PATH = None                     # None — стандартный fixtures/golden.jsonl; можно указать свой файл
+REPEATS = 3                            # сколько раз повторить прогон для честной медианы латентности
 
 KS = (1, 3, 5)
 
 def is_hit(result: dict, gold: dict) -> bool:
+    """Попадание: тот же файл, что ожидался, и в тексте чанка есть обязательная фраза."""
     return result["filename"] == gold["doc"] and gold["must"].lower() in result["text"].lower()
 
 def evaluate(name: str, search, golden: list[dict], k_max: int = 5, repeats: int = 3) -> dict:
@@ -388,13 +420,8 @@ def evaluate(name: str, search, golden: list[dict], k_max: int = 5, repeats: int
     return row
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("collection", nargs="?", default="chunks_openai")
-    ap.add_argument("--golden")
-    ap.add_argument("--repeats", type=int, default=3)
-    a = ap.parse_args()
-    cfg = load_config(a.collection)
-    golden = golden_for_rows(load_golden(a.golden), load_rows(a.collection), require_all=True)
+    cfg = load_config(COLLECTION)
+    golden = golden_for_rows(load_golden(GOLDEN_PATH), load_rows(COLLECTION), require_all=True)
     from embed import Embedder
     from retrievers import Store
     embedder = Embedder(cfg["embedder"], cfg["model"])
@@ -402,12 +429,12 @@ def main() -> None:
     for g in golden:
         embedder.embed_query(g["q"])
     print(f"query embeddings (один раз, вне поиска): {time.perf_counter() - t0:.2f} s")
-    store = Store(a.collection, embedder)
-    print(f"snapshot={cfg['dataset_hash']} questions={len(golden)} repeats={a.repeats}")
+    store = Store(COLLECTION, embedder)
+    print(f"snapshot={cfg['dataset_hash']} questions={len(golden)} repeats={REPEATS}")
     print("| retriever | Hit@1 | Hit@3 | Hit@5 | MRR@5 | p50 ms | p95 ms | warmup ms |")
     print("|---|---|---|---|---|---|---|---|")
     for name, fn in (("dense", store.dense), ("bm25", store.bm25_search), ("hybrid RRF", store.hybrid), ("hybrid + rerank", store.hybrid_rerank)):
-        r = evaluate(name, fn, golden, repeats=a.repeats)
+        r = evaluate(name, fn, golden, repeats=REPEATS)
         print(f"| {name} | {r['recall@1']:.2f} | {r['recall@3']:.2f} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} | {r['warmup_ms']:.0f} |")
         if r["misses"]:
             print("Промахи:", " | ".join(r["misses"][:6]))
@@ -422,10 +449,8 @@ if __name__ == "__main__":
 
 Новый снимок не меняет старую коллекцию и её чанки. Один флаг — и это отдельный эксперимент: индексируй с именем документа в начале каждого чанка и сравни.
 
-```bash
-python index.py --collection chunks_openai_ctx --title-prefix
-python eval.py chunks_openai_ctx
-```
+В `index.py` поставь `COLLECTION = "chunks_openai_ctx"` и `TITLE_PREFIX = True`, сохрани и нажми Run.
+В `eval.py` поставь `COLLECTION = "chunks_openai_ctx"`, сохрани и нажми Run.
 
 Дописывай строки в `results.md` с пометкой конфигурации. Если корпус — главы книг с говорящими именами файлов, эффект будет заметен на вопросах про «где» и «в какой книге»; на корпусе ksm — проверь.
 
@@ -433,10 +458,8 @@ python eval.py chunks_openai_ctx
 
 Локальная модель против API — главный вопрос для on-prem вакансий. `bge-m3` тяжёлая для CPU, но несколько сотен чанков переживёт за минуты:
 
-```bash
-python index.py --collection chunks_bge --embedder local --model BAAI/bge-m3
-python eval.py chunks_bge
-```
+В `index.py` поставь `COLLECTION = "chunks_bge"`, `EMBEDDER = "local"`, `MODEL = "BAAI/bge-m3"`, сохрани и нажми Run.
+В `eval.py` поставь `COLLECTION = "chunks_bge"`, сохрани и нажми Run.
 
 Хочешь третью строку — `intfloat/multilingual-e5-large` (префиксы подставятся сами). В отчёт: recall@5 и латентность dense-поиска для каждой модели плюс стоимость индексации API-моделью — это готовое сравнение «облако против локально» для собеседования.
 

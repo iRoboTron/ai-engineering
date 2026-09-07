@@ -1,18 +1,19 @@
 # ~/proj/ai-labs/day6-serving-security/ru_provider.py
-import os
+"""Тот же клиент OpenAI, что и в дне 1, только base_url и заголовок другие — YandexGPT говорит на том же протоколе."""
 import time
 
+import labkit
 from openai import OpenAI
 
-FOLDER = os.environ["YC_FOLDER_ID"]
+FOLDER = labkit.env("YC_FOLDER_ID", required=True)      # идентификатор каталога Yandex Cloud
 client = OpenAI(
     base_url="https://ai.api.cloud.yandex.net/v1",
-    api_key=os.environ["YC_API_KEY"],
+    api_key=labkit.env("YC_API_KEY", required=True),
     default_headers={"OpenAI-Project": FOLDER},
     timeout=60,
     max_retries=0,
 )
-MODEL = os.getenv("YC_MODEL", f"gpt://{FOLDER}/yandexgpt/latest")
+MODEL = labkit.env("YC_MODEL", f"gpt://{FOLDER}/yandexgpt/latest")
 
 t0 = time.perf_counter()
 r = client.chat.completions.create(

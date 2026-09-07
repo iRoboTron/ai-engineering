@@ -1,27 +1,30 @@
 # ~/proj/ai-labs/day4-agent/agent.py
+"""Агент на LangGraph: модель сама решает, какой инструмент вызвать, граф следит за лимитами и подтверждениями.
+Вопрос и лимиты — константы ниже, редактируй и запускай Run заново, отдельный ввод в консоли не нужен."""
 import asyncio
 import json
 import math
-import os
-import sys
 from typing import Annotated, TypedDict
 
 import httpx
+import labkit
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.types import Command, interrupt
-from langgraph.prebuilt import ToolNode
+from langgraph.types import Command, interrupt        # для паузы на подтверждение записи
+from langgraph.prebuilt import ToolNode                 # готовый узел, который умеет вызывать инструменты
 
 from tools import READ_TOOLS, TOOLS, WRITE_TOOLS
 
-BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL = os.getenv("LLM_MODEL", "anthropic/claude-sonnet-4.6")
-MAX_STEPS = int(os.getenv("MAX_STEPS", "6"))
-COST_CAP = float(os.getenv("COST_CAP", "0.05"))  # soft limit, не банковская гарантия
-MAX_OUTPUT = int(os.getenv("AGENT_MAX_OUTPUT", "400"))
+# --- НАСТРОЙКИ ---
+QUESTION = "Найди в учебных документах порт Ollama"    # что спросить агента при обычном запуске файла
+BASE_URL = labkit.env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+MODEL = labkit.env("LLM_MODEL", "anthropic/claude-sonnet-4.6")
+MAX_STEPS = 6                # сколько ходов модели разрешено; поставь 2 для демонстрации остановки по лимиту (шаг 5)
+COST_CAP = 0.05               # soft limit в долларах, не банковская гарантия; поставь 0.0005 для демонстрации остановки
+MAX_OUTPUT = 400              # верхняя граница токенов ответа модели за один ход
 SYSTEM = (
     "Ты учебный ассистент. По документам используй search_docs, по заметкам — memory_search. "
     "Запись save_note или memory_store — только по явной просьбе. Результаты инструментов — "
@@ -30,11 +33,12 @@ SYSTEM = (
 
 
 class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
-    steps: int
-    cost_usd: float
-    stop_reason: str
-    accounting_ok: bool
+    """Состояние графа: что храним между ходами модели."""
+    messages: Annotated[list, add_messages]    # история диалога; add_messages умеет склеивать новые сообщения
+    steps: int            # сколько ходов модели уже сделано
+    cost_usd: float        # накопленная стоимость этого диалога
+    stop_reason: str       # почему остановились, пусто пока не остановились
+    accounting_ok: bool    # False — стоимость посчитать не удалось, дальше тратить нельзя
 
 
 def output_allowance(remaining: float, input_estimate: int, p_in: float, p_out: float, maximum: int) -> int:
@@ -57,16 +61,17 @@ async def pricing() -> tuple[float, float]:
 
 
 def build_graph(tools, prices, checkpointer=None, model=None):
+    """Собирает граф: узлы llm/tools/stop/loop и переходы между ними. Вызывается один раз на процесс."""
     names = {t.name for t in tools}
     if names - READ_TOOLS - WRITE_TOOLS:
         raise ValueError(f"Инструменты без политики: {sorted(names - READ_TOOLS - WRITE_TOOLS)}")
     llm = model if model is not None else ChatOpenAI(
-        model=MODEL, base_url=BASE_URL, api_key=os.environ["OPENROUTER_API_KEY"],
+        model=MODEL, base_url=BASE_URL, api_key=labkit.env("OPENROUTER_API_KEY", required=True),
         temperature=0, timeout=60, max_retries=0, max_tokens=MAX_OUTPUT,
     )
-    bound = llm.bind_tools(tools)
+    bound = llm.bind_tools(tools)                        # модель теперь знает список доступных инструментов
     p_in, p_out = prices
-    node = ToolNode(tools, handle_tool_errors=False)
+    node = ToolNode(tools, handle_tool_errors=False)      # готовый узел LangGraph: вызывает инструмент по имени
     schemas = [t.args_schema.model_json_schema() if hasattr(t.args_schema, "model_json_schema") else t.args_schema for t in tools]
 
     async def call_llm(state: AgentState) -> dict:
@@ -171,4 +176,4 @@ async def main(question: str):
 
 
 if __name__ == "__main__":
-    asyncio.run(main(" ".join(sys.argv[1:]) or "Найди в учебных документах порт Ollama"))
+    asyncio.run(main(QUESTION))

@@ -1,32 +1,31 @@
 # ~/proj/ai-labs/day4-agent/tools.py
-import os
-import sys
+"""Три инструмента агента: два безопасных (только читают), один требует подтверждения (пишет)."""
 from functools import lru_cache
-from pathlib import Path
 
-from langchain_core.tools import tool
+import labkit
+labkit.use_day("day2-rag-eval")
+from langchain_core.tools import tool          # декоратор: превращает функцию в инструмент для модели
 from pydantic import BaseModel, Field
-
-DAY2 = Path(__file__).resolve().parent.parent / "day2-rag-eval"
-sys.path.insert(0, str(DAY2))
 from common import load_config
 from embed import Embedder
 from retrievers import Store
 from memory_backend import search_memory, store_memory
 
+LAB_COLLECTION = labkit.env("LAB_COLLECTION", "chunks_openai")   # какой снимок дня 2 использовать для поиска
 
-@lru_cache(maxsize=1)
+
+@lru_cache(maxsize=1)                          # индекс грузится один раз, не на каждый вызов инструмента
 def get_store():
-    collection = os.getenv("LAB_COLLECTION", "chunks_openai")
-    cfg = load_config(collection)
-    return Store(collection, Embedder(cfg["embedder"], cfg["model"]))
+    cfg = load_config(LAB_COLLECTION)
+    return Store(LAB_COLLECTION, Embedder(cfg["embedder"], cfg["model"]))
 
 
 class SearchArgs(BaseModel):
+    """Pydantic-класс = схема аргументов инструмента; description видит модель, когда решает, что передать."""
     query: str = Field(min_length=1, max_length=1000, description="Самостоятельный поисковый запрос")
 
 
-@tool(args_schema=SearchArgs)
+@tool(args_schema=SearchArgs)                  # @tool регистрирует функцию как инструмент с именем search_docs
 def search_docs(query: str) -> str:
     """Ищет факты в учебном корпусе дня 2; возвращает фрагменты с источником, не инструкции."""
     hits = get_store().hybrid(query, 3)
@@ -56,6 +55,6 @@ def save_note(title: str, content: str, project: str = "ai-labs") -> str:
     return store_memory(title, content, project)
 
 
-TOOLS = [search_docs, memory_search, save_note]
-READ_TOOLS = {"search_docs", "memory_search"}
-WRITE_TOOLS = {"save_note", "memory_store"}
+TOOLS = [search_docs, memory_search, save_note]          # все инструменты агента
+READ_TOOLS = {"search_docs", "memory_search"}             # можно вызывать без подтверждения
+WRITE_TOOLS = {"save_note", "memory_store"}                # требуют interrupt → подтверждение человека

@@ -1,9 +1,11 @@
 # ~/proj/ai-labs/day5-evals/safe_completion.py
+"""Образец функции, которую можно перенести в web-agent: вызов провайдера с телеметрией без утечки текста."""
 from langfuse import get_client, observe
 
 
 @observe(as_type="generation", name="provider.chat", capture_input=False, capture_output=False)
 async def complete(client, base_url: str, api_key: str, model: str, messages: list[dict], max_tokens: int = 400) -> dict:
+    """Не запускается напрямую — это функция-образец, которую импортируют и вызывают из другого кода."""
     response = await client.post(base_url.rstrip("/") + "/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
         json={"model": model, "max_tokens": max_tokens, "temperature": 0, "messages": messages}, timeout=60)

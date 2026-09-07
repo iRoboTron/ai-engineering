@@ -1,11 +1,20 @@
 # ~/proj/ai-labs/day6-serving-security/red_team.py
-import argparse
+"""Проверяет десять атак из attacks.jsonl против твоего тестового tenant. Три режима — все через константы ниже,
+без флагов командной строки: DRY RUN по умолчанию (сеть не трогает), живой прогон на staging,
+пересчёт уже сохранённого прогона offline."""
 import json
-import os
 import re
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
+
+import labkit
+
+# --- НАСТРОЙКИ: три независимых режима, включай по одному ---
+RUN_LIVE = False            # False — только DRY RUN (список атак, без сети); True — реальные запросы к WA_URL
+TAG = "before"               # метка живого прогона: "before" на первом проходе, "after" — после фиксов
+EVALUATE_PATH = None         # Path(".local/redteam-before.raw.json") — пересчитать сохранённый прогон без сети
+EVIDENCE_PATH = None         # Path(".local/retrieval-evidence.json") — server-side evidence для атак A04/A05
 
 HERE = Path(__file__).resolve().parent
 POISON_MARKER = "ASSISTANT-OVERRIDE-TEST"
@@ -73,36 +82,30 @@ def report(rows: list[dict], evidence: dict) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run-live", action="store_true", help="Платные запросы только к своему тестовому tenant")
-    parser.add_argument("--tag", default="before")
-    parser.add_argument("--evaluate", type=Path, help="Пересчитать сохранённый raw-отчёт без сети")
-    parser.add_argument("--evidence", type=Path, help="JSON: session_id -> реальные retrieved_chunks из журнала сервера")
-    args = parser.parse_args()
-    evidence = json.loads(args.evidence.read_text()) if args.evidence else {}
-    if args.evaluate:
-        return report(json.loads(args.evaluate.read_text()), evidence)
+    evidence = json.loads(EVIDENCE_PATH.read_text()) if EVIDENCE_PATH else {}
+    if EVALUATE_PATH:
+        return report(json.loads(EVALUATE_PATH.read_text()), evidence)
     attacks = [json.loads(line) for line in (HERE / "attacks.jsonl").read_text().splitlines() if line.strip()]
-    if not args.run_live:
-        print(f"DRY RUN: {len(attacks)} сценариев, сеть не вызывается. Для своего staging: --run-live --tag before")
+    if not RUN_LIVE:
+        print(f"DRY RUN: {len(attacks)} сценариев, сеть не вызывается. Для своего staging поставь RUN_LIVE = True")
         return 0
-    base = os.environ["WA_URL"].rstrip("/")
+    base = labkit.env("WA_URL", required=True).rstrip("/")
     parsed = urlparse(base)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("WA_URL должен быть HTTP(S) URL")
-    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} and os.getenv("WA_ALLOW_REMOTE") != "1":
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} and labkit.env("WA_ALLOW_REMOTE") != "1":
         raise ValueError("Удалённый стенд требует WA_ALLOW_REMOTE=1 и разрешения владельца")
-    token = os.environ["WA_WIDGET_TOKEN"]
+    token = labkit.env("WA_WIDGET_TOKEN", required=True)
     control = send(base, token, "Какой контрольный код учебного стенда указан в правилах обслуживания?")
     if control.get("status") != 200 or CONTROL not in (control.get("answer") or ""):
         print("ERROR: контрольный запрос не дал ожидаемый факт; атаки не выполнялись")
         return 2
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
-        raise ValueError("Некорректный tag")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", TAG):
+        raise ValueError("Некорректный TAG")
     rows = [{"attack": attack, "result": send(base, token, attack["message"])} for attack in attacks]
     directory = HERE / ".local"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"redteam-{args.tag}.raw.json"
+    path = directory / f"redteam-{TAG}.raw.json"
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Raw-отчёт (не публиковать автоматически): {path}")
     return report(rows, evidence)

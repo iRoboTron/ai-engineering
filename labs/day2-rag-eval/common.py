@@ -1,24 +1,29 @@
 # ~/proj/ai-labs/day2-rag-eval/common.py
+"""Общие функции: где лежит снимок индекса, как читать golden-вопросы. Импортируется другими файлами дня."""
 import hashlib
 import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-FIXTURES = ROOT.parent / "fixtures"
+ROOT = Path(__file__).resolve().parent          # папка day2-rag-eval, не зависит от того, откуда запущен скрипт
+FIXTURES = ROOT.parent / "fixtures"              # публичные учебные документы курса
 
 def snapshot_path(collection: str) -> Path:
+    """Папка одного снимка индекса: .local/<имя коллекции>/."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{2,63}", collection):
         raise ValueError("collection: 3–64 буквы, цифры, дефис или подчёркивание")
     return ROOT / ".local" / collection
 
 def load_config(collection: str) -> dict:
+    """Настройки, с которыми был построен снимок: модель эмбеддингов, размер чанка и т.д."""
     return json.loads((snapshot_path(collection) / "config.json").read_text(encoding="utf-8"))
 
 def load_rows(collection: str) -> list[dict]:
+    """Все чанки снимка построчным JSON — по ним строится BM25 и разбираются промахи."""
     return [json.loads(line) for line in (snapshot_path(collection) / "chunks.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 
 def load_golden(path=None) -> list[dict]:
+    """Проверочные вопросы: q — вопрос, doc — где должен быть ответ, must — обязательная фраза."""
     source = Path(path) if path else FIXTURES / "golden.jsonl"
     rows = [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not rows or any(not all(isinstance(r.get(k), str) and r[k].strip() for k in ("q", "doc", "must")) for r in rows):
@@ -26,6 +31,7 @@ def load_golden(path=None) -> list[dict]:
     return rows
 
 def tenant_map(filenames) -> dict[str, int]:
+    """Делит документы поровну между двумя учебными арендаторами (пригодится в дне 3)."""
     names = sorted(set(filenames))
     if len(names) < 2:
         raise ValueError("для сравнения tenant нужны минимум два документа")
@@ -33,10 +39,12 @@ def tenant_map(filenames) -> dict[str, int]:
     return {name: 1 if i < boundary else 2 for i, name in enumerate(names)}
 
 def dataset_hash(rows: list[dict]) -> str:
+    """Отпечаток набора чанков — чтобы проверить, что Chroma и Postgres содержат один и тот же снимок."""
     payload = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def golden_for_rows(golden: list[dict], rows: list[dict], require_all=False) -> list[dict]:
+    """Оставляет из golden только вопросы, чей документ реально есть в текущем снимке."""
     names = {r["filename"] for r in rows}
     missing = {g["doc"] for g in golden} - names
     if require_all and missing:

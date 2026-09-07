@@ -1,17 +1,19 @@
 # ~/proj/ai-labs/day5-evals/judge.py
+"""Свой судья с рубрикой «правильность по эталону», плюс проверка согласия с твоей ручной разметкой."""
 import json
-import os
-import sys
-
 from pathlib import Path
 
+import labkit
 from langfuse import get_client
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-JUDGE = os.environ["JUDGE_MODEL"]
-client = OpenAI(base_url=BASE_URL, api_key=os.environ["OPENROUTER_API_KEY"], timeout=60)
+# --- НАСТРОЙКИ ---
+RUN_FILE = ".local/run-hybrid-v1.json"     # какой прогон experiment.py оценивать
+
+BASE_URL = labkit.env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+JUDGE = labkit.env("JUDGE_MODEL", required=True)
+client = OpenAI(base_url=BASE_URL, api_key=labkit.env("OPENROUTER_API_KEY", required=True), timeout=60)
 langfuse = get_client()
 
 RUBRIC = """Ты судья качества ответа службы поддержки. Сравни ОТВЕТ с ЭТАЛОНОМ.
@@ -36,8 +38,7 @@ def judge(question: str, answer: str, reference: str) -> Verdict:
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    path = Path(sys.argv[1]).expanduser()
-    path = path if path.is_absolute() else here / path
+    path = here / RUN_FILE
     rows = [r for r in json.loads(path.read_text(encoding="utf-8")) if r.get("reference")]
     manual_path = here / ".local" / "manual_labels.json"
     manual = json.loads(manual_path.read_text(encoding="utf-8")) if manual_path.exists() else {}

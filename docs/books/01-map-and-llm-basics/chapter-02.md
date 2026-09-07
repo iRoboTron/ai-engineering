@@ -9,7 +9,7 @@
 ```mermaid
 flowchart LR
     HH["hh.ru\n20 вакансий"] --> VAC["career/vacancies-2026-09.md\nтоп-10 требований"]
-    HH --> TXT["3 текста вакансий\ncareer/vacancies/*.txt"]
+    HH --> TXT["3 текста вакансий\nai-labs/data/vacancies/*.txt"]
     CL["client.py\nOpenRouter через socks5"] --> S1["01 usage, temperature\nтокены RU/EN"]
     CL --> S2["02 structured output\nPydantic + json_schema"]
     CL --> S3["03 streaming\nTTFT, tok/s"]
@@ -79,6 +79,141 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
 
 Ожидаемо `200`. При `403` проверь условия доступа провайдера и сетевой маршрут; код сам по себе не доказывает, что прокси не применился. `curl` читает `https_proxy` в нижнем регистре, `httpx` — в любом, поэтому в файле заданы оба. Модель по умолчанию взята из конфига web-agent; любую другую подставишь через `LLM_MODEL`, список — `openrouter.ai/models`.
 
+### labkit: один файл вместо параметров командной строки
+
+Все дни этой недели используют общий модуль `labkit.py`. Он делает две вещи: читает `.env` сам, без
+`source`, и определяет пути `labkit.DATA`, `labkit.OUT`, `labkit.FIXTURES`, одинаковые для всех дней.
+Каждый скрипт лабы начинается с `import labkit` — после этого ключ, модель и прокси уже в окружении
+процесса, а результаты и входные файлы всегда лежат в одном и том же месте. Все настройки, которые
+раньше были бы флагами командной строки (какую модель взять, какой файл обработать, сколько раз
+повторить), в этой серии — именованные константы в начале файла: меняешь значение, сохраняешь, нажимаешь
+Run. Вводить ничего в консоли не нужно.
+
+```python
+# ~/proj/ai-labs/labkit.py
+"""Общий вход для всех лаб: читает .env и задаёт пути.
+
+Первая строка каждого скрипта — `import labkit`. После этого ключи и модель из .env
+уже в переменных окружения, а пути к данным одинаковы во всех днях.
+"""
+import os                     # доступ к переменным окружения
+import sys                    # список путей, где Python ищет модули
+from pathlib import Path      # объектные пути к файлам вместо строк
+
+ROOT = Path(__file__).resolve().parent   # папка проекта ~/proj/ai-labs
+ENV_FILE = ROOT / ".env"                 # ключи и настройки (в git не попадает)
+DATA = ROOT / "data"                     # твои входные файлы: вакансии, документы, разметка
+OUT = ROOT / "out"                       # результаты запусков, по папке на день
+LOCAL = ROOT / ".local"                  # кэши и снимки индексов; не публикуется
+FIXTURES = ROOT / "fixtures"             # учебные публичные данные из курса
+
+
+def load_env(path: Path = ENV_FILE) -> int:
+    """Читает строки вида KEY=value и export KEY="value". Уже заданные переменные не перезаписывает."""
+    if not path.is_file():                                  # .env ещё не создан — работаем без него
+        return 0
+    loaded = 0
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:   # пустые строки и комментарии
+            continue
+        if line.startswith("export "):                            # форма для source в терминале
+            line = line[len("export "):]
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]                                   # снимаем кавычки
+        value = os.path.expandvars(value)                         # https_proxy="$HTTPS_PROXY" → подстановка
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
+
+
+def env(name: str, default: str | None = None, *, required: bool = False) -> str | None:
+    """Переменная из окружения или .env. required=True даёт понятную ошибку вместо KeyError."""
+    value = os.environ.get(name, default)
+    if required and not value:
+        raise SystemExit(f"Нет переменной {name}: добавь строку {name}=... в {ENV_FILE} (образец — .env.example)")
+    return value
+
+
+def out_dir(day: str) -> Path:
+    """Папка результатов дня, например out/day1. Создаётся при первом обращении."""
+    path = OUT / day
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def use_day(name: str) -> Path:
+    """Делает модули другого дня видимыми для импорта: labkit.use_day("day2-rag-eval"); потом from common import ...."""
+    path = ROOT / name
+    if not path.is_dir():
+        raise SystemExit(f"Нет папки {path}: сначала установи лабы курса")
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+    return path
+
+
+load_env()                                # выполняется один раз при первом import labkit
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))            # корень проекта виден для импортов из любого дня
+```
+
+Настрой интерпретатор VS Code один раз на весь проект — дальше он не спрашивается снова:
+
+<!-- lab: .vscode/settings.json -->
+```json
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true
+}
+```
+
+Открой папку `~/proj/ai-labs` в VS Code (`code ~/proj/ai-labs` или «Файл → Открыть папку»). После этого
+любой `.py`-файл запускается кнопкой ▶ Run в правом верхнем углу или `F5` — без терминала, без активации
+окружения руками, без аргументов. Всё окружение недели — один `.venv` в корне `ai-labs`, тот же, что ты
+создал только что; отдельного окружения на каждый день нет и не нужно: зависимости всех семи дней уже
+зафиксированы в одном `requirements.txt`.
+
+Полный список переменных недели — в одном файле-образце, чтобы не искать по главам, какая переменная
+для какого дня. Не редактируй его напрямую: скопируй в `.env` и впиши свои значения, `.env` в `.gitignore`,
+`.env.example` — нет, это справочник, в нём не должно быть настоящих ключей.
+
+```bash
+# ~/proj/ai-labs/.env.example
+# Скопируй в .env и заполни: cp .env.example .env
+# День 1 — обязательно с самого начала
+export OPENROUTER_API_KEY="sk-or-..."
+export LLM_MODEL="anthropic/claude-haiku-4.5"
+export HTTPS_PROXY="socks5h://192.168.0.106:1080"    # нужен только из РФ; убери, если провайдер доступен напрямую
+export https_proxy="$HTTPS_PROXY"
+# export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"   # обычно не нужно менять
+# export LLM_MODEL_CHEAP="deepseek/deepseek-v4-flash-0731"    # день 1, шаг 6: с чем сравнивать по цене
+
+# День 3 — после первого запуска docker-compose (шаг 1 главы 2 дня 3, генерируется один раз)
+# export PG_ADMIN_PASSWORD="..."
+# export PG_APP_PASSWORD="..."
+# export PG_ADMIN_DSN="postgresql://rag_admin:$PG_ADMIN_PASSWORD@127.0.0.1:5433/rag"
+# export PG_DSN="postgresql://rag_app:$PG_APP_PASSWORD@127.0.0.1:5433/rag"
+
+# День 4 — опционально, только для удалённого сервиса памяти (по умолчанию локальный JSON, без этих строк)
+# export MEMORY_URL="http://100.69.146.20:443"
+# export MEMORY_REMOTE_PROJECT="ai-labs"
+
+# День 5 — после регистрации в своём Langfuse (шаг 1 главы 2 дня 5)
+# export LANGFUSE_PUBLIC_KEY="pk-lf-..."
+# export LANGFUSE_SECRET_KEY="sk-lf-..."
+# export LANGFUSE_HOST="http://127.0.0.1:3000"
+# export JUDGE_MODEL="anthropic/claude-haiku-4.5"    # день 5 (судья) и день 6 (не используется), независим от LLM_MODEL
+
+# День 6 — опционально, по числу пройденных шагов
+# export OLLAMA_URL="http://127.0.0.1:11434"
+# export YC_FOLDER_ID="..."          # каталог Yandex Cloud, для ru_provider.py
+# export YC_API_KEY="..."
+# export WA_URL="http://127.0.0.1:8000"      # тестовый staging web-agent для red_team.py
+# export WA_WIDGET_TOKEN="..."
+```
+
 ## Шаг 1. Двадцать вакансий (30 минут, без кода)
 
 Открой hh.ru и по очереди поищи: «AI инженер», «LLM инженер», «ML инженер LLM», «разработчик AI агентов», «RAG», «Python LLM». Отбери 20 вакансий, которые ты бы реально рассматривал (уровень middle или «без указания», Python, удалёнка или твой город). По каждой заполни строку таблицы в `~/Documents/lessons/ai-engineering/career/vacancies-2026-09.md`:
@@ -89,7 +224,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
 | 1 | … | AI-инженер | 250–350k | Python, RAG, LangChain, pgvector, FastAPI | Langfuse, vLLM | Python, RAG, FastAPI, Postgres | … |
 ```
 
-Затем внизу файла — подсчёт: сколько раз встретилось каждое требование. Двадцать вакансий дадут честную картину: что в топе, чего у тебя нет, какие слова обязаны быть в резюме. Три вакансии с самым подробным текстом сохрани целиком в `career/vacancies/01.txt`, `02.txt`, `03.txt` — они пойдут в шаг 4.
+Затем внизу файла — подсчёт: сколько раз встретилось каждое требование. Двадцать вакансий дадут честную картину: что в топе, чего у тебя нет, какие слова обязаны быть в резюме. Три вакансии с самым подробным текстом сохрани целиком в `~/proj/ai-labs/data/vacancies/01.txt`, `02.txt`, `03.txt` — они пойдут в шаг 4 (это входные данные лабы, они лежат рядом с кодом, а не в отдельном репозитории career).
 
 Не пропускай этот шаг ради кода: он определяет, какими словами ты вечером напишешь резюме.
 
@@ -99,22 +234,23 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://openrouter.ai/api/v1/models
 
 ```python
 # ~/proj/ai-labs/day1-llm-basics/client.py
-import os
-from openai import OpenAI
+import labkit                 # читает .env: ключ, модель, прокси
+from openai import OpenAI     # официальный клиент OpenAI; OpenRouter говорит на том же протоколе
 
-BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL = os.getenv("LLM_MODEL", "anthropic/claude-haiku-4.5")
+# --- НАСТРОЙКИ (общие для всех скриптов дня 1) ---
+BASE_URL = labkit.env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")   # адрес API
+MODEL = labkit.env("LLM_MODEL", "anthropic/claude-haiku-4.5")                  # модель по умолчанию
 
 
 def make_client(timeout: float = 60.0) -> OpenAI:
-    """Клиент OpenAI-совместимого API. Прокси берётся из HTTPS_PROXY автоматически (httpx)."""
-    api_key = os.environ["OPENROUTER_API_KEY"]  # KeyError лучше, чем тихий 401
+    """Создаёт клиент. Прокси из HTTPS_PROXY библиотека httpx подхватывает сама."""
+    api_key = labkit.env("OPENROUTER_API_KEY", required=True)   # без ключа — понятная ошибка, а не тихий 401
     return OpenAI(
-        base_url=BASE_URL,
-        api_key=api_key,
-        timeout=timeout,
-        max_retries=0,
-        default_headers={
+        base_url=BASE_URL,      # куда слать запросы
+        api_key=api_key,        # заголовок Authorization
+        timeout=timeout,        # секунд на один запрос
+        max_retries=0,          # повторы делаем сами (шаг 7), чтобы их видеть
+        default_headers={       # OpenRouter показывает эти поля в статистике приложений
             "HTTP-Referer": "https://ai-engineering.adelfos.ru",
             "X-Title": "ai-labs day1",
         },
@@ -129,19 +265,30 @@ def make_client(timeout: float = 60.0) -> OpenAI:
 
 ```python
 # ~/proj/ai-labs/day1-llm-basics/01_basics.py
+import labkit  # noqa: F401  читает .env
 from client import make_client, MODEL
+
+# --- НАСТРОЙКИ ---
+QUESTION = "Придумай название для сервиса, который отвечает на вопросы по документам компании."
+TEMPERATURES = (0.0, 1.0)     # 0 — почти детерминированно, 1 — разнообразно
+REPEATS = 3                   # сколько раз задать один вопрос при каждой температуре
+SAMPLES = (                   # пара фраз одинакового смысла для сравнения токенов
+    "The quick brown fox jumps over the lazy dog near the river.",
+    "Быстрая рыжая лиса перепрыгивает через ленивую собаку у реки.",
+)
 
 client = make_client()
 
 
 def ask(prompt: str, temperature: float):
+    """Один запрос к модели. Возвращает текст ответа и usage — счётчики токенов."""
     r = client.chat.completions.create(
         model=MODEL,
         temperature=temperature,
-        max_tokens=120,
+        max_tokens=120,                                   # потолок длины ответа
         messages=[
-            {"role": "system", "content": "Отвечай одним коротким предложением, без пояснений."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "Отвечай одним коротким предложением, без пояснений."},  # правила
+            {"role": "user", "content": prompt},                                                    # вопрос
         ],
     )
     if not r.choices or not r.choices[0].message.content or r.usage is None:
@@ -149,19 +296,16 @@ def ask(prompt: str, temperature: float):
     return r.choices[0].message.content.strip(), r.usage
 
 
-QUESTION = "Придумай название для сервиса, который отвечает на вопросы по документам компании."
-for t in (0.0, 1.0):
+print(f"модель: {MODEL}")
+for t in TEMPERATURES:
     print(f"\n=== temperature={t} ===")
-    for i in range(3):
+    for i in range(REPEATS):
         text, usage = ask(QUESTION, t)
-        print(f"{i + 1}. {text}   [in={usage.prompt_tokens} out={usage.completion_tokens}]")
+        print(f"{i + 1}. {text}   [in={usage.prompt_tokens} out={usage.completion_tokens}]")   # in — токены запроса, out — ответа
 
 print("\n=== токены: русский против английского ===")
-for s in (
-    "The quick brown fox jumps over the lazy dog near the river.",
-    "Быстрая рыжая лиса перепрыгивает через ленивую собаку у реки.",
-):
-    r = client.chat.completions.create(model=MODEL, max_tokens=1, messages=[{"role": "user", "content": s}])
+for s in SAMPLES:
+    r = client.chat.completions.create(model=MODEL, max_tokens=1, messages=[{"role": "user", "content": s}])  # ответ не нужен, нужен подсчёт входа
     print(f"{r.usage.prompt_tokens:4d} токенов | {len(s):3d} символов | {s}")
 ```
 
@@ -176,27 +320,32 @@ for s in (
 import json
 import re
 import sys
-from pathlib import Path
-
 from typing import Literal
-from openai import BadRequestError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+import labkit                       # читает .env, даёт пути DATA и OUT
+from openai import BadRequestError  # ошибка 400 от провайдера
+from pydantic import BaseModel, ConfigDict, Field, model_validator   # Pydantic: описание и проверка формы данных
 
 from client import make_client, MODEL
 
+# --- НАСТРОЙКИ ---
+INPUT_DIR = labkit.DATA / "vacancies"       # сюда положи тексты вакансий: 01.txt, 02.txt, 03.txt
+OUT_DIR = labkit.out_dir("day1")            # результат: out/day1/<имя файла>.json
+
 
 class Vacancy(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    title: str = Field(description="Название позиции как в тексте")
-    company: str = Field(description="Компания или unknown")
-    seniority: Literal["junior", "middle", "senior", "unknown"]
-    must_have: list[str]
-    nice_to_have: list[str]
-    salary_min: int | None = Field(description="Нижняя граница в рублях или null")
-    salary_max: int | None = Field(description="Верхняя граница в рублях или null")
-    remote: bool | None
+    """Какие поля хотим получить из текста вакансии. Из этого класса строится JSON-схема для модели."""
+    model_config = ConfigDict(extra="forbid")                                    # лишние поля запрещены
+    title: str = Field(description="Название позиции как в тексте")              # description видит модель
+    company: str = Field(description="Компания или unknown")                     # компания или "unknown"
+    seniority: Literal["junior", "middle", "senior", "unknown"]                  # уровень, только из списка
+    must_have: list[str]                                                         # обязательные требования
+    nice_to_have: list[str]                                                      # желательные требования
+    salary_min: int | None = Field(description="Нижняя граница в рублях или null")   # нижняя граница ЗП
+    salary_max: int | None = Field(description="Верхняя граница в рублях или null")  # верхняя граница ЗП
+    remote: bool | None                                                          # удалёнка: true / false / null
 
-    @model_validator(mode="after")
+    @model_validator(mode="after")                    # проверка после заполнения всех полей
     def check_salary(self):
         if any(v is not None and v < 0 for v in (self.salary_min, self.salary_max)):
             raise ValueError("зарплата не может быть отрицательной")
@@ -206,18 +355,19 @@ class Vacancy(BaseModel):
 
 
 SYSTEM = "Ты извлекаешь структурированные данные из текста вакансии. Отвечай только JSON по схеме, без пояснений и без markdown."
-FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.S)
+FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.S)   # срезает ```json ... ``` если модель обернула ответ
 
 
 def extract(client, text: str) -> Vacancy:
-    schema = Vacancy.model_json_schema()
+    """Текст вакансии → объект Vacancy. Сначала строгий режим json_schema, при отказе провайдера — запасной."""
+    schema = Vacancy.model_json_schema()                  # Pydantic-класс → JSON Schema
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}]
     try:
         r = client.chat.completions.create(
             model=MODEL,
-            temperature=0,
+            temperature=0,                                # извлечение данных: без случайности
             max_tokens=600,
-            response_format={"type": "json_schema", "json_schema": {"name": "vacancy", "strict": True, "schema": schema}},
+            response_format={"type": "json_schema", "json_schema": {"name": "vacancy", "strict": True, "schema": schema}},  # провайдер ограничивает вывод схемой
             messages=messages,
         )
         mode = "json_schema"
@@ -226,31 +376,31 @@ def extract(client, text: str) -> Vacancy:
         if not any(word in str(exc).lower() for word in ("json_schema", "response_format", "structured output")):
             raise
         print(f"  json_schema не прошёл ({type(exc).__name__}), запасной путь через промпт", file=sys.stderr)
-        messages[0]["content"] += "\nСхема JSON:\n" + json.dumps(schema, ensure_ascii=False)
+        messages[0]["content"] += "\nСхема JSON:\n" + json.dumps(schema, ensure_ascii=False)   # схема текстом в промпт
         r = client.chat.completions.create(model=MODEL, temperature=0, max_tokens=600, messages=messages)
         mode = "prompt+validate"
     if not r.choices or not r.choices[0].message.content or r.choices[0].finish_reason == "length":
         raise RuntimeError("structured output отсутствует/оборван; отказ или лимит не считается успешным JSON")
     raw = FENCE.sub("", r.choices[0].message.content.strip())
-    vacancy = Vacancy.model_validate_json(raw)  # ValidationError не замалчивается и не публикуется как успех
+    vacancy = Vacancy.model_validate_json(raw)            # проверка той же схемой; ошибка не замалчивается
     print(f"  режим: {mode}, usage={r.usage}")
     return vacancy
 
 
 if __name__ == "__main__":
+    files = sorted(INPUT_DIR.glob("*.txt"))
+    if not files:
+        raise SystemExit(f"Нет файлов *.txt в {INPUT_DIR}: сохрани туда тексты вакансий (шаг 1 лабы)")
     client = make_client()
-    if len(sys.argv) < 2:
-        raise SystemExit("передай пути к публичным текстам вакансий")
-    out = Path(__file__).resolve().parent / "out"
-    out.mkdir(exist_ok=True)
-    for path in map(Path, sys.argv[1:]):
+    for path in files:
         print(f"\n{path.name}")
         v = extract(client, path.read_text(encoding="utf-8"))
-        (out / f"{path.stem}.json").write_text(v.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8")
+        (OUT_DIR / f"{path.stem}.json").write_text(v.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8")  # объект → JSON-файл
         print(f"  {v.title} @ {v.company} [{v.seniority}] must={len(v.must_have)} remote={v.remote}")
+    print(f"\nJSON сохранены в {OUT_DIR}")
 ```
 
-Запуск: `python 02_structured.py ~/Documents/lessons/ai-engineering/career/vacancies/0*.txt`. Три JSON-файла в `out/`, в консоли — режим (`json_schema` или запасной) и токены. Если в `stderr` каждый раз запасной путь — модель не поддерживает structured outputs через OpenRouter; выбери на `openrouter.ai/models` модель с фильтром «Structured Outputs» и повтори с другим `LLM_MODEL`. Оба варианта — легитимный результат для `results.md`: на собеседовании ценят именно понимание, что запасной путь обязателен.
+Запуск: нажми Run — файл сам находит все `*.txt` в `~/proj/ai-labs/data/vacancies/`. Три JSON-файла появятся в `out/day1/`, в консоли — режим (`json_schema` или запасной) и токены. Если в `stderr` каждый раз запасной путь — модель не поддерживает structured outputs через OpenRouter; выбери на `openrouter.ai/models` модель с фильтром «Structured Outputs» и поставь другую `LLM_MODEL` в `.env`. Оба варианта — легитимный результат для `results.md`: на собеседовании ценят именно понимание, что запасной путь обязателен.
 
 ## Шаг 5. Streaming: время до первого токена
 
@@ -258,36 +408,41 @@ if __name__ == "__main__":
 # ~/proj/ai-labs/day1-llm-basics/03_streaming.py
 import time
 
+import labkit  # noqa: F401  читает .env
 from client import make_client, MODEL
 
+# --- НАСТРОЙКИ ---
+PROMPT = "Объясни в пяти предложениях, что такое RAG, для DevOps-инженера."
+MAX_TOKENS = 300
+
 client = make_client()
-t0 = time.perf_counter()
-first = None
-usage = None
+t0 = time.perf_counter()      # момент отправки запроса
+first = None                  # момент первого токена (для TTFT)
+usage = None                  # счётчики токенов, приходят в последнем чанке
 
 stream = client.chat.completions.create(
     model=MODEL,
-    stream=True,
-    stream_options={"include_usage": True},
-    max_tokens=300,
-    messages=[{"role": "user", "content": "Объясни в пяти предложениях, что такое RAG, для DevOps-инженера."}],
+    stream=True,                                  # ответ приходит кусками, а не целиком
+    stream_options={"include_usage": True},       # попросить usage в конце стрима
+    max_tokens=MAX_TOKENS,
+    messages=[{"role": "user", "content": PROMPT}],
 )
-for event in stream:
+for event in stream:                              # каждый event — один кусок ответа
     if event.usage:
-        usage = event.usage  # приходит в последнем чанке
+        usage = event.usage                       # последний чанк: только usage, без текста
     if not event.choices:
         continue
-    delta = event.choices[0].delta.content or ""
+    delta = event.choices[0].delta.content or ""  # новые символы в этом куске
     if delta and first is None:
-        first = time.perf_counter()
-    print(delta, end="", flush=True)
+        first = time.perf_counter()               # первый токен пришёл
+    print(delta, end="", flush=True)              # печатаем сразу, как чат в браузере
 
 t1 = time.perf_counter()
 if first is None:
     raise RuntimeError("стрим не содержал текста: проверь отказ и finish_reason")
-print(f"\n\nTTFT: {first - t0:.2f}s | всего: {t1 - t0:.2f}s", end="")
+print(f"\n\nTTFT: {first - t0:.2f}s | всего: {t1 - t0:.2f}s", end="")     # TTFT — время до первого токена
 if usage and first:
-    print(f" | out={usage.completion_tokens} → {max(0, usage.completion_tokens - 1) / max(t1 - first, 1e-9):.1f} tok/s")
+    print(f" | out={usage.completion_tokens} → {max(0, usage.completion_tokens - 1) / max(t1 - first, 1e-9):.1f} tok/s")  # скорость генерации
 else:
     print(" | usage в стриме не пришёл — провайдер не поддерживает include_usage")
 ```
@@ -296,26 +451,31 @@ else:
 
 ## Шаг 6. Стоимость по прайсу провайдера
 
-OpenRouter отдаёт цены за токен в `GET /api/v1/models`. Считаем стоимость типичного RAG-запроса (3500 токенов на входе, 400 на выходе) для месяца с тысячей запросов в день и сравниваем твою модель с дешёвой. Дешёвую выбери из списка, который печатает скрипт, и передай через `LLM_MODEL_CHEAP`.
+OpenRouter отдаёт цены за токен в `GET /api/v1/models`. Считаем стоимость типичного RAG-запроса (3500 токенов на входе, 400 на выходе) для месяца с тысячей запросов в день и сравниваем твою модель с дешёвой. Файл уже сравнивает с `deepseek/deepseek-v4-flash-0731`; хочешь другую — впиши её в `CHEAP_MODEL` из списка, который печатает скрипт, и запусти снова.
 
 ```python
 # ~/proj/ai-labs/day1-llm-basics/04_cost.py
-import os
-
 import httpx
+import labkit
 
 from client import BASE_URL, MODEL
 
-IN_TOKENS, OUT_TOKENS, REQ_PER_MONTH = 3500, 400, 1000 * 30
+# --- НАСТРОЙКИ ---
+IN_TOKENS, OUT_TOKENS = 3500, 400           # типичный RAG-запрос: контекст + вопрос → короткий ответ
+REQ_PER_MONTH = 1000 * 30                   # нагрузка сценария: тысяча запросов в день
+CHEAP_MODEL = labkit.env("LLM_MODEL_CHEAP", "deepseek/deepseek-v4-flash-0731")  # модель для сравнения
+MIN_CONTEXT = 100_000                       # фильтр для списка дешёвых моделей
 
 
 def load_models() -> list[dict]:
+    """Каталог моделей OpenRouter: цены, размер контекста, поддерживаемые параметры."""
     r = httpx.get(f"{BASE_URL}/models", timeout=30)  # прокси из HTTPS_PROXY подхватится сам
-    r.raise_for_status()
+    r.raise_for_status()                    # исключение при HTTP-ошибке
     return r.json()["data"]
 
 
 def price(models: list[dict], model_id: str) -> tuple[float, float, int | None]:
+    """Цена за один токен входа и выхода (USD) и размер контекста."""
     for m in models:
         if m["id"] == model_id:
             p = m["pricing"]
@@ -328,17 +488,15 @@ def monthly_cost(p_in: float, p_out: float) -> float:
 
 
 models = load_models()
-cheap_candidates = sorted(
-    (m for m in models if float(m["pricing"]["prompt"]) > 0 and (m.get("context_length") or 0) >= 100_000),
-    key=lambda m: float(m["pricing"]["prompt"]),
+cheap_candidates = sorted(                                                        # платные модели с большим контекстом
+    (m for m in models if float(m["pricing"]["prompt"]) > 0 and (m.get("context_length") or 0) >= MIN_CONTEXT),
+    key=lambda m: float(m["pricing"]["prompt"]),                                  # сортировка по цене входа
 )[:10]
-print("10 самых дешёвых моделей с контекстом ≥ 100k (цена за 1M входных токенов, USD):")
+print(f"10 самых дешёвых моделей с контекстом ≥ {MIN_CONTEXT // 1000}k (цена за 1M входных токенов, USD):")
 for m in cheap_candidates:
     print(f"  {float(m['pricing']['prompt']) * 1e6:8.3f}  {m['id']}")
 
-for label, mid in (("основная", MODEL), ("дешёвая", os.getenv("LLM_MODEL_CHEAP", ""))):
-    if not mid:
-        continue
+for label, mid in (("основная", MODEL), ("дешёвая", CHEAP_MODEL)):
     p_in, p_out, ctx = price(models, mid)
     print(f"\n{label}: {mid} (контекст {ctx})")
     print(f"  вход ${p_in * 1e6:.2f}/1M, выход ${p_out * 1e6:.2f}/1M, отношение выход/вход: {p_out / p_in if p_in else None}")
@@ -358,37 +516,46 @@ import random
 import sys
 import time
 
-from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+import labkit  # noqa: F401  читает .env
+from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError   # ошибки, после которых есть смысл повторить
 
 from client import make_client, MODEL
 
-RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+# --- НАСТРОЙКИ ---
+TIMEOUT = 60.0      # секунд на запрос; поставь 0.3, чтобы увидеть ретраи по таймауту
+ATTEMPTS = 5        # максимум попыток
+BASE_DELAY = 1.0    # первая пауза, дальше удвоение: 1, 2, 4, 8…
+MAX_DELAY = 20.0    # потолок паузы
+PROMPT = "Одним предложением: зачем клиенту к LLM нужны ретраи?"
+
+RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)   # 429, сеть, таймаут, 5xx
 
 
-def with_retries(fn, attempts: int = 5, base: float = 1.0, cap: float = 20.0):
+def with_retries(fn, attempts: int = ATTEMPTS, base: float = BASE_DELAY, cap: float = MAX_DELAY):
+    """Вызывает fn(); при временной ошибке ждёт и повторяет. Exponential backoff с джиттером."""
     for attempt in range(1, attempts + 1):
         try:
             return fn()
         except RETRYABLE as exc:
             if attempt == attempts:
-                raise
-            delay = min(cap, base * 2 ** (attempt - 1)) + random.uniform(0, 0.5)  # экспонента + джиттер
+                raise                                                             # попытки кончились — ошибка наверх
+            delay = min(cap, base * 2 ** (attempt - 1)) + random.uniform(0, 0.5)  # экспонента + случайный сдвиг
             print(f"попытка {attempt} не удалась: {type(exc).__name__}; жду {delay:.1f}s", file=sys.stderr)
             time.sleep(delay)
 
 
-client = make_client(timeout=float(sys.argv[1]) if len(sys.argv) > 1 else 60.0)
+client = make_client(timeout=TIMEOUT)
 answer = with_retries(
-    lambda: client.chat.completions.create(
+    lambda: client.chat.completions.create(          # lambda: сам запрос упакован в функцию без аргументов
         model=MODEL,
         max_tokens=60,
-        messages=[{"role": "user", "content": "Одним предложением: зачем клиенту к LLM нужны ретраи?"}],
+        messages=[{"role": "user", "content": PROMPT}],
     )
 )
 print(answer.choices[0].message.content)
 ```
 
-Два прогона. Обычный: `python 05_retry.py` — ответ с первой попытки. С искусственно малым таймаутом: `python 05_retry.py 0.3` — в `stderr` видны попытки с растущими паузами, потом либо успех, либо исключение после пятой. Затем `LLM_MODEL=nonexistent/model python 05_retry.py` — падает сразу, без ретраев: `NotFoundError` не входит в `RETRYABLE`, и это правильно.
+Два прогона. Обычный: нажми Run — ответ с первой попытки. С искусственно малым таймаутом: поставь `TIMEOUT = 0.3` и запусти снова — в `stderr` видны попытки с растущими паузами, потом либо успех, либо исключение после пятой. Затем в терминале (это разовая проверка конкретного факта, не обычный запуск лабы) `LLM_MODEL=nonexistent/model python 05_retry.py` — падает сразу, без ретраев: `NotFoundError` не входит в `RETRYABLE`, и это правильно. Не забудь вернуть `TIMEOUT = 60.0`.
 
 ## Шаг 8. results.md и коммит
 
@@ -440,5 +607,5 @@ print(answer.choices[0].message.content)
 - В `~/proj/ai-labs/day1-llm-basics/` семь файлов: `client.py`, пять скриптов `01`–`05`, плюс `results.md`; репозиторий закоммичен и запушен.
 - `02_structured.py` вернул валидные объекты для всех трёх вакансий; в отчёте указан режим.
 - `results.md` содержит числа: токены RU/EN, TTFT, tok/s, коэффициент выход/вход, две месячные стоимости.
-- `05_retry.py 0.3` показал растущие паузы, а несуществующая модель упала без ретраев.
+- `05_retry.py` с `TIMEOUT = 0.3` показал растущие паузы, а несуществующая модель упала без ретраев.
 - В отчёте есть три строки выводов, и одна из них — про то, что пойдёт в резюме.

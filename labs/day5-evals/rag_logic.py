@@ -1,5 +1,6 @@
 # ~/proj/ai-labs/day5-evals/rag_logic.py
-REFUSAL = "В документах нет ответа на этот вопрос"
+"""Правило честного отказа: если поиск ничего не нашёл — не зовём модель, а сразу отвечаем «не знаю»."""
+REFUSAL = "В документах нет ответа на этот вопрос"     # ровно эта строка — и по ней потом проверяют отказ
 
 
 def is_refusal(result: dict) -> bool:
@@ -9,7 +10,7 @@ def is_refusal(result: dict) -> bool:
 def answer_from_context(question: str, chunks: list[dict], complete) -> dict:
     # Детерминированная ветка при пустом retrieval; отсутствие ответа в непустом top-k
     # всё ещё проверяется end-to-end negative-примерами, а не поиском пары слов в чанках.
-    answer = complete(question, chunks) if chunks else REFUSAL
+    answer = complete(question, chunks) if chunks else REFUSAL   # chunks пуст → отказ без вызова модели
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("Пустой/невалидный ответ — ERROR")
     refusal = answer.strip().rstrip(".") == REFUSAL

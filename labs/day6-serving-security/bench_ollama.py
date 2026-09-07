@@ -1,13 +1,16 @@
 # ~/proj/ai-labs/day6-serving-security/bench_ollama.py
+"""Замеряет реальную скорость Ollama: сколько токенов в секунду и сколько ждать первый токен (TTFT)."""
 import json
-import os
 import statistics
-import sys
 import time
 
 import httpx
+import labkit
 
-OLLAMA = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+# --- НАСТРОЙКИ ---
+MODELS = ["qwen2.5:7b-instruct-q4_K_M", "qwen2.5:7b-instruct-q8_0"]   # сравниваемые теги одной модели
+
+OLLAMA = labkit.env("OLLAMA_URL", "http://127.0.0.1:11434")
 PROMPT = "Объясни в пяти предложениях, что такое RAG, для DevOps-инженера."
 LONG_PROMPT = PROMPT + "\nКонтекст:\n" + ("Ollama слушает порт 11434 и отдаёт API. " * 100)
 CONTEXT = 4096
@@ -55,10 +58,9 @@ def unload(model: str):
 
 
 if __name__ == "__main__":
-    models = sys.argv[1:] or ["qwen2.5:7b-instruct-q4_K_M", "qwen2.5:7b-instruct-q8_0"]
     print("| модель | память | tok/s median3 | TTFT median3, с | long tokens / prefill, с |")
     print("|---|---|---|---|---|")
-    for model in models:
+    for model in MODELS:
         unload(model)
         try:
             run(model, "прогрев")  # не входит в статистику; кэш промпта не отключён

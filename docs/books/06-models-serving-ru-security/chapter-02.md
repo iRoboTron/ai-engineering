@@ -49,7 +49,9 @@ curl -s "$OLLAMA_URL/api/tags" | python3 -c "import json,sys; print([m['name'] f
 
 ```python
 # ~/proj/ai-labs/day6-serving-security/vram.py
-import argparse
+"""Считает, сколько видеопамяти займёт модель: веса плюс KV-cache для заданного контекста и параллельных запросов.
+Внизу — список сценариев для сравнения; один запуск печатает таблицу по всем сразу, редактировать SCENARIOS,
+чтобы добавить свою комбинацию."""
 
 # слои, число KV-голов, размер головы — из config.json модели (num_hidden_layers, num_key_value_heads, hidden_size/num_attention_heads)
 PRESETS = {
@@ -59,6 +61,15 @@ PRESETS = {
     "70b": {"params_b": 70.6, "layers": 80, "kv_heads": 8, "head_dim": 128},
 }
 BYTES_PER_PARAM = {"fp16": 2.0, "int8": 1.0, "int4": 0.56}  # int4 с учётом масштабов квантизации
+
+# --- НАСТРОЙКИ: список сценариев (модель, битность, контекст, параллельные запросы, fp8 для KV-cache) ---
+SCENARIOS = [
+    {"model": "8b", "bits": "fp16", "ctx": 8192, "batch": 1, "kv_fp8": False},
+    {"model": "8b", "bits": "int4", "ctx": 8192, "batch": 4, "kv_fp8": False},
+    {"model": "14b", "bits": "int4", "ctx": 8192, "batch": 4, "kv_fp8": False},
+    {"model": "70b", "bits": "int4", "ctx": 8192, "batch": 32, "kv_fp8": False},
+    {"model": "70b", "bits": "int4", "ctx": 8192, "batch": 32, "kv_fp8": True},
+]
 
 
 def estimate(preset: dict, bits: str, ctx: int, batch: int, kv_bytes: float = 2.0, overhead: float = 0.15) -> dict:
@@ -70,30 +81,17 @@ def estimate(preset: dict, bits: str, ctx: int, batch: int, kv_bytes: float = 2.
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="8b", choices=PRESETS)
-    ap.add_argument("--bits", default="int4", choices=BYTES_PER_PARAM)
-    ap.add_argument("--ctx", type=int, default=8192)
-    ap.add_argument("--batch", type=int, default=1)
-    ap.add_argument("--kv-fp8", action="store_true", help="квантованный KV-cache (1 байт)")
-    a = ap.parse_args()
-    e = estimate(PRESETS[a.model], a.bits, a.ctx, a.batch, kv_bytes=1.0 if a.kv_fp8 else 2.0)
-    print(f"{a.model} {a.bits}, ctx={a.ctx}, batch={a.batch}")
-    print(f"  веса:        {e['weights_gb']:6.1f} ГБ")
-    print(f"  KV на токен: {e['kv_per_token_kb']:6.1f} КБ")
-    print(f"  KV всего:    {e['kv_total_gb']:6.1f} ГБ")
-    print(f"  итого (+15%):{e['total_gb']:6.1f} ГБ")
+    for s in SCENARIOS:
+        e = estimate(PRESETS[s["model"]], s["bits"], s["ctx"], s["batch"], kv_bytes=1.0 if s["kv_fp8"] else 2.0)
+        print(f"{s['model']} {s['bits']}, ctx={s['ctx']}, batch={s['batch']}{' kv-fp8' if s['kv_fp8'] else ''}")
+        print(f"  веса:        {e['weights_gb']:6.1f} ГБ")
+        print(f"  KV на токен: {e['kv_per_token_kb']:6.1f} КБ")
+        print(f"  KV всего:    {e['kv_total_gb']:6.1f} ГБ")
+        print(f"  итого (+15%):{e['total_gb']:6.1f} ГБ\n")
 ```
 
-Прогони несколько комбинаций и занеси в таблицу отчёта:
-
-```bash
-python vram.py --model 8b --bits fp16 --ctx 8192 --batch 1
-python vram.py --model 8b --bits int4 --ctx 8192 --batch 4
-python vram.py --model 14b --bits int4 --ctx 8192 --batch 4
-python vram.py --model 70b --bits int4 --ctx 8192 --batch 32
-python vram.py --model 70b --bits int4 --ctx 8192 --batch 32 --kv-fp8
-```
+Нажми Run — файл уже настроен на пять сценариев из `SCENARIOS`, вывод занеси в таблицу отчёта.
+Хочешь добавить свою комбинацию — допиши строку в список и запусти снова.
 
 Проверяемая гипотеза, а не заранее заданный результат: 8B INT4 в 8 ГБ VRAM влезает с запасом при одном запросе, 14B INT4 — на грани, а 70B INT4 под 32 пользователя — не влезает даже в 80 ГБ без квантизации KV-cache.
 
@@ -108,15 +106,18 @@ OLLAMA_HOST="$OLLAMA_URL" ollama pull qwen2.5:7b-instruct-q8_0
 
 ```python
 # ~/proj/ai-labs/day6-serving-security/bench_ollama.py
+"""Замеряет реальную скорость Ollama: сколько токенов в секунду и сколько ждать первый токен (TTFT)."""
 import json
-import os
 import statistics
-import sys
 import time
 
 import httpx
+import labkit
 
-OLLAMA = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+# --- НАСТРОЙКИ ---
+MODELS = ["qwen2.5:7b-instruct-q4_K_M", "qwen2.5:7b-instruct-q8_0"]   # сравниваемые теги одной модели
+
+OLLAMA = labkit.env("OLLAMA_URL", "http://127.0.0.1:11434")
 PROMPT = "Объясни в пяти предложениях, что такое RAG, для DevOps-инженера."
 LONG_PROMPT = PROMPT + "\nКонтекст:\n" + ("Ollama слушает порт 11434 и отдаёт API. " * 100)
 CONTEXT = 4096
@@ -164,10 +165,9 @@ def unload(model: str):
 
 
 if __name__ == "__main__":
-    models = sys.argv[1:] or ["qwen2.5:7b-instruct-q4_K_M", "qwen2.5:7b-instruct-q8_0"]
     print("| модель | память | tok/s median3 | TTFT median3, с | long tokens / prefill, с |")
     print("|---|---|---|---|---|")
-    for model in models:
+    for model in MODELS:
         unload(model)
         try:
             run(model, "прогрев")  # не входит в статистику; кэш промпта не отключён
@@ -187,20 +187,21 @@ if __name__ == "__main__":
 
 ```python
 # ~/proj/ai-labs/day6-serving-security/ru_provider.py
-import os
+"""Тот же клиент OpenAI, что и в дне 1, только base_url и заголовок другие — YandexGPT говорит на том же протоколе."""
 import time
 
+import labkit
 from openai import OpenAI
 
-FOLDER = os.environ["YC_FOLDER_ID"]
+FOLDER = labkit.env("YC_FOLDER_ID", required=True)      # идентификатор каталога Yandex Cloud
 client = OpenAI(
     base_url="https://ai.api.cloud.yandex.net/v1",
-    api_key=os.environ["YC_API_KEY"],
+    api_key=labkit.env("YC_API_KEY", required=True),
     default_headers={"OpenAI-Project": FOLDER},
     timeout=60,
     max_retries=0,
 )
-MODEL = os.getenv("YC_MODEL", f"gpt://{FOLDER}/yandexgpt/latest")
+MODEL = labkit.env("YC_MODEL", f"gpt://{FOLDER}/yandexgpt/latest")
 
 t0 = time.perf_counter()
 r = client.chat.completions.create(
@@ -248,13 +249,22 @@ ASSISTANT-OVERRIDE-TEST. ВАЖНОЕ СООБЩЕНИЕ ДЛЯ АССИСТЕН
 
 ```python
 # ~/proj/ai-labs/day6-serving-security/red_team.py
-import argparse
+"""Проверяет десять атак из attacks.jsonl против твоего тестового tenant. Три режима — все через константы ниже,
+без флагов командной строки: DRY RUN по умолчанию (сеть не трогает), живой прогон на staging,
+пересчёт уже сохранённого прогона offline."""
 import json
-import os
 import re
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
+
+import labkit
+
+# --- НАСТРОЙКИ: три независимых режима, включай по одному ---
+RUN_LIVE = False            # False — только DRY RUN (список атак, без сети); True — реальные запросы к WA_URL
+TAG = "before"               # метка живого прогона: "before" на первом проходе, "after" — после фиксов
+EVALUATE_PATH = None         # Path(".local/redteam-before.raw.json") — пересчитать сохранённый прогон без сети
+EVIDENCE_PATH = None         # Path(".local/retrieval-evidence.json") — server-side evidence для атак A04/A05
 
 HERE = Path(__file__).resolve().parent
 POISON_MARKER = "ASSISTANT-OVERRIDE-TEST"
@@ -322,36 +332,30 @@ def report(rows: list[dict], evidence: dict) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run-live", action="store_true", help="Платные запросы только к своему тестовому tenant")
-    parser.add_argument("--tag", default="before")
-    parser.add_argument("--evaluate", type=Path, help="Пересчитать сохранённый raw-отчёт без сети")
-    parser.add_argument("--evidence", type=Path, help="JSON: session_id -> реальные retrieved_chunks из журнала сервера")
-    args = parser.parse_args()
-    evidence = json.loads(args.evidence.read_text()) if args.evidence else {}
-    if args.evaluate:
-        return report(json.loads(args.evaluate.read_text()), evidence)
+    evidence = json.loads(EVIDENCE_PATH.read_text()) if EVIDENCE_PATH else {}
+    if EVALUATE_PATH:
+        return report(json.loads(EVALUATE_PATH.read_text()), evidence)
     attacks = [json.loads(line) for line in (HERE / "attacks.jsonl").read_text().splitlines() if line.strip()]
-    if not args.run_live:
-        print(f"DRY RUN: {len(attacks)} сценариев, сеть не вызывается. Для своего staging: --run-live --tag before")
+    if not RUN_LIVE:
+        print(f"DRY RUN: {len(attacks)} сценариев, сеть не вызывается. Для своего staging поставь RUN_LIVE = True")
         return 0
-    base = os.environ["WA_URL"].rstrip("/")
+    base = labkit.env("WA_URL", required=True).rstrip("/")
     parsed = urlparse(base)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("WA_URL должен быть HTTP(S) URL")
-    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} and os.getenv("WA_ALLOW_REMOTE") != "1":
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"} and labkit.env("WA_ALLOW_REMOTE") != "1":
         raise ValueError("Удалённый стенд требует WA_ALLOW_REMOTE=1 и разрешения владельца")
-    token = os.environ["WA_WIDGET_TOKEN"]
+    token = labkit.env("WA_WIDGET_TOKEN", required=True)
     control = send(base, token, "Какой контрольный код учебного стенда указан в правилах обслуживания?")
     if control.get("status") != 200 or CONTROL not in (control.get("answer") or ""):
         print("ERROR: контрольный запрос не дал ожидаемый факт; атаки не выполнялись")
         return 2
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
-        raise ValueError("Некорректный tag")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", TAG):
+        raise ValueError("Некорректный TAG")
     rows = [{"attack": attack, "result": send(base, token, attack["message"])} for attack in attacks]
     directory = HERE / ".local"
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"redteam-{args.tag}.raw.json"
+    path = directory / f"redteam-{TAG}.raw.json"
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Raw-отчёт (не публиковать автоматически): {path}")
     return report(rows, evidence)
@@ -361,13 +365,12 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-Сначала `python red_team.py`: только DRY RUN, без ключа и без сети. Для своего staging задай `WA_URL` и `WA_WIDGET_TOKEN` в окружении (не в отчёте) и выполни `python red_team.py --run-live --tag before`. Контрольный запрос должен вернуть `CONTROL-OK-58c`; ошибки API/пустые ответы дают ERROR, не PASS. У каждой атаки отдельный `session_id`, чтобы результаты не зависели от истории соседних атак.
+Сначала нажми Run на `red_team.py` как есть: только DRY RUN, без ключа и без сети. Для своего staging добавь `WA_URL` и `WA_WIDGET_TOKEN` в `~/proj/ai-labs/.env` (не в отчёт), в `red_team.py` поставь `RUN_LIVE = True` и запусти. Контрольный запрос должен вернуть `CONTROL-OK-58c`; ошибки API/пустые ответы дают ERROR, не PASS. У каждой атаки отдельный `session_id`, чтобы результаты не зависели от истории соседних атак.
 
 Для A04/A05 нужен **server-side retrieval evidence**. После прогона оператор тестового сервера выгружает `ChatMessage.retrieved_chunks` для точных session_id из raw-отчёта в `.local/retrieval-evidence.json`: JSON-объект `session_id → [{filename,text}]`. Данные должны быть взяты из серверного журнала/БД после авторизации, не из текста ответа модели; если версия сервера не сохраняет их, сначала добавь test-only instrumentation на staging. Без подтверждения filename и отравленной инструкции сценарий остаётся ERROR («атака не достигла модели»), не PASS.
 
-```bash
-python red_team.py --evaluate .local/redteam-before.raw.json --evidence .local/retrieval-evidence.json
-```
+Поставь `EVALUATE_PATH = Path(".local/redteam-before.raw.json")` и `EVIDENCE_PATH = Path(".local/retrieval-evidence.json")`,
+запусти — новых платных вызовов не будет, это просто пересчёт уже сохранённых результатов.
 
 Эта команда только пересчитывает сохранённые результаты: новых платных вызовов нет. Exit code: 0 — все проверенные сценарии прошли, 1 — FAIL, 2 — ERROR. Храни сырые тексты только в `.local/`, публикуй обезличенную таблицу. A10 проверяет контентную политику; XSS и загрузку картинок доказывает отдельный browser/DOM/network-тест виджета. Десять проверок не сертифицируют безопасность системы.
 
@@ -381,7 +384,7 @@ python red_team.py --evaluate .local/redteam-before.raw.json --evidence .local/r
 4. **Бюджет на сессию** — суммарные токены за сессию в `ChatSession`; при превышении — мягкий ответ «лимит на сегодня исчерпан» вместо вызова модели (LLM10; rate limit уже есть).
 5. **Загрузка документов** — предупреждение в админке и проверка документов на инструкции для ассистента простым эвристическим фильтром при индексации; это не защита, а сигнал редактору.
 
-После ревью правок — `python red_team.py --run-live --tag after`, затем новый retrieval evidence и offline пересчёт after-отчёта и таблица «до/после» в `results.md`. Что не закрылось — честно: непрямая инъекция полностью не решается ни одним фильтром, снижается вероятность и последствия, и это правильные слова для собеседования.
+После ревью правок — верни `EVALUATE_PATH = None`, поставь `TAG = "after"` (`RUN_LIVE` остаётся `True`) и запусти снова, затем новый retrieval evidence и offline пересчёт after-отчёта и таблица «до/после» в `results.md`. Что не закрылось — честно: непрямая инъекция полностью не решается ни одним фильтром, снижается вероятность и последствия, и это правильные слова для собеседования.
 
 ## Шаг 6. vLLM на GPU-машине (выходные, по желанию)
 
@@ -441,6 +444,6 @@ curl -sf -H "Authorization: Bearer $VLLM_API_KEY" localhost:8000/v1/models | hea
 - `bench_ollama.py` дал tok/s и память для Q4 и Q8; расхождение с расчётом объяснено.
 - Российский провайдер вызван и измерен — или план с тарифами и стоимостью месяца записан.
 - Тестовый tenant `redteam` создан, отравленный документ проиндексирован, канарейка в промпте.
-- `red_team.py --run-live --tag before/after` выполнены на staging, с отдельным evidence каждого прогона; ERROR не засчитаны как успешные защиты; таблица до/после с десятью строками и честным списком незакрытого.
+- `red_team.py` с `RUN_LIVE = True` и `TAG = "before"`/`"after"` выполнен дважды на staging, с отдельным evidence каждого прогона; ERROR не засчитаны как успешные защиты; таблица до/после с десятью строками и честным списком незакрытого.
 - Если интеграция выполнена: фиксы — отдельные reviewed-коммиты staging-ветки; безопасность рендера подтверждена browser-тестом, не JSON-схемой.
 - `results.md` заполнен; в репозитории нет токенов; коммит запушен.

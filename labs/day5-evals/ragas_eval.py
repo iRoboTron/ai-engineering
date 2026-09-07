@@ -1,10 +1,9 @@
 # ~/proj/ai-labs/day5-evals/ragas_eval.py
+"""Считает три готовые метрики RAGAS по сохранённому прогону experiment.py и пишет их в Langfuse."""
 import json
-import os
-import sys
-
 from pathlib import Path
 
+import labkit
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langfuse import get_client
 from ragas import EvaluationDataset, evaluate
@@ -12,14 +11,15 @@ from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
 from ragas.metrics import Faithfulness, LLMContextPrecisionWithoutReference, LLMContextRecall, ResponseRelevancy
 
-BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-JUDGE = os.environ["JUDGE_MODEL"]
-KEY = os.environ["OPENROUTER_API_KEY"]
+# --- НАСТРОЙКИ: сначала .local/run-dense-v1.json, потом .local/run-hybrid-v1.json ---
+RUN_FILE = ".local/run-hybrid-v1.json"     # какой прогон experiment.py оценивать
+
+BASE_URL = labkit.env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+JUDGE = labkit.env("JUDGE_MODEL", required=True)
+KEY = labkit.env("OPENROUTER_API_KEY", required=True)
 langfuse = get_client()
 
-path = Path(sys.argv[1]).expanduser()
-if not path.is_absolute():
-    path = Path(__file__).resolve().parent / path
+path = Path(__file__).resolve().parent / RUN_FILE
 rows = json.loads(path.read_text(encoding="utf-8"))
 if not rows:
     raise ValueError("Пустой прогон")

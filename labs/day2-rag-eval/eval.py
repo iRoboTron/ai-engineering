@@ -1,14 +1,22 @@
 # ~/proj/ai-labs/day2-rag-eval/eval.py
-import argparse
+"""Прогоняет golden-вопросы через четыре ретривера и печатает таблицу Hit@k / MRR / латентность.
+COLLECTION внизу должен совпадать с тем, что ты только что построил в index.py."""
 import math
 import time
 from statistics import mean, median
 
+import labkit                          # noqa: F401  подключает .env
 from common import golden_for_rows, load_config, load_golden, load_rows
+
+# --- НАСТРОЙКИ ---
+COLLECTION = "chunks_openai"           # тот же снимок, что в index.py
+GOLDEN_PATH = None                     # None — стандартный fixtures/golden.jsonl; можно указать свой файл
+REPEATS = 3                            # сколько раз повторить прогон для честной медианы латентности
 
 KS = (1, 3, 5)
 
 def is_hit(result: dict, gold: dict) -> bool:
+    """Попадание: тот же файл, что ожидался, и в тексте чанка есть обязательная фраза."""
     return result["filename"] == gold["doc"] and gold["must"].lower() in result["text"].lower()
 
 def evaluate(name: str, search, golden: list[dict], k_max: int = 5, repeats: int = 3) -> dict:
@@ -37,13 +45,8 @@ def evaluate(name: str, search, golden: list[dict], k_max: int = 5, repeats: int
     return row
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("collection", nargs="?", default="chunks_openai")
-    ap.add_argument("--golden")
-    ap.add_argument("--repeats", type=int, default=3)
-    a = ap.parse_args()
-    cfg = load_config(a.collection)
-    golden = golden_for_rows(load_golden(a.golden), load_rows(a.collection), require_all=True)
+    cfg = load_config(COLLECTION)
+    golden = golden_for_rows(load_golden(GOLDEN_PATH), load_rows(COLLECTION), require_all=True)
     from embed import Embedder
     from retrievers import Store
     embedder = Embedder(cfg["embedder"], cfg["model"])
@@ -51,12 +54,12 @@ def main() -> None:
     for g in golden:
         embedder.embed_query(g["q"])
     print(f"query embeddings (один раз, вне поиска): {time.perf_counter() - t0:.2f} s")
-    store = Store(a.collection, embedder)
-    print(f"snapshot={cfg['dataset_hash']} questions={len(golden)} repeats={a.repeats}")
+    store = Store(COLLECTION, embedder)
+    print(f"snapshot={cfg['dataset_hash']} questions={len(golden)} repeats={REPEATS}")
     print("| retriever | Hit@1 | Hit@3 | Hit@5 | MRR@5 | p50 ms | p95 ms | warmup ms |")
     print("|---|---|---|---|---|---|---|---|")
     for name, fn in (("dense", store.dense), ("bm25", store.bm25_search), ("hybrid RRF", store.hybrid), ("hybrid + rerank", store.hybrid_rerank)):
-        r = evaluate(name, fn, golden, repeats=a.repeats)
+        r = evaluate(name, fn, golden, repeats=REPEATS)
         print(f"| {name} | {r['recall@1']:.2f} | {r['recall@3']:.2f} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} | {r['warmup_ms']:.0f} |")
         if r["misses"]:
             print("Промахи:", " | ".join(r["misses"][:6]))

@@ -1,20 +1,20 @@
 # ~/proj/ai-labs/day3-pgvector/eval_pg.py
-import argparse
-import sys
+"""Тот же golden-набор и та же функция evaluate из дня 2 — только Postgres рядом с Chroma, честное сравнение."""
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+import labkit
+labkit.use_day("day2-rag-eval")
 from common import golden_for_rows, load_config, load_golden, load_rows
 from eval import evaluate
 
+# --- НАСТРОЙКИ ---
+COLLECTION = "chunks_openai"   # снимок, загруженный load.py
+GOLDEN_PATH = None             # None — стандартный golden.jsonl
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("collection", nargs="?", default="chunks_openai")
-    ap.add_argument("--golden")
-    a = ap.parse_args()
-    cfg, rows = load_config(a.collection), load_rows(a.collection)
-    golden = golden_for_rows(load_golden(a.golden), rows, require_all=True)
+    cfg, rows = load_config(COLLECTION), load_rows(COLLECTION)
+    golden = golden_for_rows(load_golden(GOLDEN_PATH), rows, require_all=True)
     from embed import Embedder
     from retrievers import Store
     from pgstore import PgStore
@@ -30,7 +30,7 @@ def main() -> None:
         subset = golden_for_rows(golden, subset_rows)
         if not subset:
             continue
-        chroma = Store(a.collection, embedder, tenant_id=tenant)
+        chroma = Store(COLLECTION, embedder, tenant_id=tenant)
         pg = PgStore(tenant, embedder)
         try:
             if pg.snapshot_config() != cfg:

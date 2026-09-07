@@ -48,6 +48,10 @@ mkdir -p day3-pgvector && cd day3-pgvector
 
 ## Шаг 1. PostgreSQL с pgvector в Docker (5 минут)
 
+Секреты для этой учебной базы генерируются **один раз**, кладутся в `~/proj/ai-labs/.env` и дальше просто
+подхватываются: и `docker compose` (он сам читает `.env` рядом с `docker-compose.yml`), и Python-скрипты
+(через `labkit`, как ключ OpenRouter в дне 1). Ничего не экспортировать заново в новой сессии.
+
 ```yaml
 # ~/proj/ai-labs/day3-pgvector/docker-compose.yml
 services:
@@ -70,17 +74,26 @@ volumes:
   pgdata:
 ```
 
+Один раз — сгенерировать и дописать в `~/proj/ai-labs/.env` (уже в `.gitignore`, `chmod 600` сохраняется):
+
 ```bash
-export PG_ADMIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
-export PG_APP_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
-# Сохрани переменные в локальном .env вне Git для последующих сессий.
-export PG_ADMIN_DSN="postgresql://rag_admin:$PG_ADMIN_PASSWORD@127.0.0.1:5433/rag"
-export PG_DSN="postgresql://rag_app:$PG_APP_PASSWORD@127.0.0.1:5433/rag"
+{
+  echo "export PG_ADMIN_PASSWORD=\"$(python -c 'import secrets; print(secrets.token_hex(24))')\""
+  echo "export PG_APP_PASSWORD=\"$(python -c 'import secrets; print(secrets.token_hex(24))')\""
+  echo 'export PG_ADMIN_DSN="postgresql://rag_admin:$PG_ADMIN_PASSWORD@127.0.0.1:5433/rag"'
+  echo 'export PG_DSN="postgresql://rag_app:$PG_APP_PASSWORD@127.0.0.1:5433/rag"'
+} >> ~/proj/ai-labs/.env
+source ~/proj/ai-labs/.env
+```
+
+Дальше — в любой сессии, без повторной генерации:
+
+```bash
 docker compose up -d --wait
 docker compose exec pg psql -U rag_admin -d rag -c "CREATE EXTENSION IF NOT EXISTS vector; SELECT extversion FROM pg_extension WHERE extname='vector';"
 ```
 
-Команды рассчитаны на новую учебную БД. Существующий volume сохраняет старого пользователя и пароль: не удаляй его ради инструкции, используй отдельное имя Compose-проекта и свободный порт. Пароли выше генерируются один раз, не при каждом запуске; сохрани их в исключённом из Git `.env` с правами `chmod 600 .env`. Административный DSN нельзя использовать в приложении.
+Команды рассчитаны на новую учебную БД. Существующий volume сохраняет старого пользователя и пароль: не удаляй его ради инструкции, используй отдельное имя Compose-проекта и свободный порт. `docker compose` сам читает `.env` из своей рабочей директории `day3-pgvector/` — но переменные там нет, они в `~/proj/ai-labs/.env` на уровень выше, поэтому их обязательно нужно `source` перед `docker compose up`, иначе сработает заглушка `:?set PG_ADMIN_PASSWORD` из compose-файла. Административный DSN нельзя использовать в приложении.
 
 Ожидаемо версия расширения `0.8.x` или новее. Запиши её — итеративный скан из шага 5 требует не ниже 0.8.0.
 
@@ -136,20 +149,18 @@ docker compose exec -T pg psql -U rag_admin -d rag -v ON_ERROR_STOP=1 -v app_pas
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/load.py
-import argparse
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+"""Копирует вчерашний снимок Chroma в Postgres: те же id, тексты и векторы, без пересчёта эмбеддингов."""
+import labkit
+labkit.use_day("day2-rag-eval")  # добавляет day2-rag-eval в sys.path — оттуда common.py
 from common import load_config, snapshot_path
 
+# --- НАСТРОЙКИ ---
+COLLECTION = "chunks_openai"   # снимок из day2-rag-eval/index.py, который загружаем
+REPLACE_LAB_DATA = False       # True — разрешить перезаписать уже загруженную учебную таблицу (не для прода!)
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("collection", nargs="?", default="chunks_openai")
-    ap.add_argument("--replace-lab-data", action="store_true")
-    a = ap.parse_args()
-    config = load_config(a.collection)
+    config = load_config(COLLECTION)
     if config["dimension"] != 1536:
         raise SystemExit("эта учебная схема vector(1536); для другой модели нужна отдельная схема")
     import chromadb
@@ -157,18 +168,18 @@ def main() -> None:
     import psycopg
     from pgvector.psycopg import register_vector
     from psycopg.types.json import Jsonb
-    col = chromadb.PersistentClient(path=str(snapshot_path(a.collection) / "chroma")).get_collection(a.collection)
+    col = chromadb.PersistentClient(path=str(snapshot_path(COLLECTION) / "chroma")).get_collection(COLLECTION)
     data = col.get(include=["embeddings", "documents", "metadatas"])
     rows = [(cid, m["tenant_id"], m["filename"], m["chunk_index"], doc, np.asarray(emb, dtype=np.float32))
             for cid, doc, m, emb in zip(data["ids"], data["documents"], data["metadatas"], data["embeddings"])]
     if not rows:
         raise SystemExit("снимок пуст")
-    with psycopg.connect(os.environ["PG_ADMIN_DSN"]) as conn:
-        register_vector(conn)
+    with psycopg.connect(labkit.env("PG_ADMIN_DSN", required=True)) as conn:
+        register_vector(conn)                                       # учит psycopg сериализовать numpy-вектор
         if conn.execute("SELECT current_database(), current_user").fetchone() != ("rag", "rag_admin"):
             raise RuntimeError("загрузчик разрешён только в учебной БД rag от rag_admin")
-        if conn.execute("SELECT count(*) FROM chunks").fetchone()[0] and not a.replace_lab_data:
-            raise RuntimeError("таблица непуста; проверь DSN и явно разреши --replace-lab-data")
+        if conn.execute("SELECT count(*) FROM chunks").fetchone()[0] and not REPLACE_LAB_DATA:
+            raise RuntimeError("таблица непуста; проверь PG_ADMIN_DSN и явно поставь REPLACE_LAB_DATA = True")
         # Только учебный admin; атомарная замена снимка, политика RLS не отключается.
         conn.execute("TRUNCATE chunks, lab_snapshot")
         with conn.cursor() as cur:
@@ -243,11 +254,9 @@ docker compose exec -T -e PGPASSWORD="$PG_APP_PASSWORD" pg psql -h 127.0.0.1 -U 
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/pgstore.py
-import os
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+"""То же самое, что Store из дня 2 (dense/BM25/hybrid), но SQL-запросами к Postgres вместо Chroma."""
+import labkit
+labkit.use_day("day2-rag-eval")
 from embed import Embedder
 
 DENSE_SQL = """
@@ -277,12 +286,14 @@ WHERE dense.id IS NOT NULL OR fts.id IS NOT NULL
 ORDER BY score DESC LIMIT %(k)s"""
 
 class PgStore:
+    """Подключение от имени rag_app (не admin!) — тогда работает RLS и tenant нельзя обойти."""
+
     def __init__(self, tenant_id: int, embedder: Embedder):
         if type(tenant_id) is not int or tenant_id <= 0:
             raise ValueError("tenant_id должен быть положительным int")
         import psycopg
         from pgvector.psycopg import register_vector
-        self.conn = psycopg.connect(os.environ["PG_DSN"], autocommit=True)
+        self.conn = psycopg.connect(labkit.env("PG_DSN", required=True), autocommit=True)
         register_vector(self.conn)
         flags = self.conn.execute("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user").fetchone()
         if any(flags):
@@ -291,6 +302,7 @@ class PgStore:
         self.tenant_id, self.embedder = tenant_id, embedder
 
     def _rows(self, sql: str, params=None) -> list[dict]:
+        """Каждый запрос — своя транзакция: tenant выставляется и автоматически сбрасывается вместе с ней."""
         with self.conn.transaction():
             self.conn.execute("SELECT set_config('app.tenant_id', %s, true)", (str(self.tenant_id),))
             self.conn.execute("SET LOCAL hnsw.ef_search = 100")
@@ -313,6 +325,7 @@ class PgStore:
         return self._rows(HYBRID_SQL, {"v": self._vec(q), "q": q, "k": k, "cand": cand})
 
     def visible_rows(self) -> list[dict]:
+        """Все строки, видимые этой ролью прямо сейчас — используется для сверки со снимком Chroma."""
         return self._rows("SELECT id, tenant_id, filename, chunk_index, text FROM chunks ORDER BY id")
 
     def snapshot_config(self) -> dict:
@@ -330,22 +343,22 @@ class PgStore:
 
 ```python
 # ~/proj/ai-labs/day3-pgvector/eval_pg.py
-import argparse
-import sys
+"""Тот же golden-набор и та же функция evaluate из дня 2 — только Postgres рядом с Chroma, честное сравнение."""
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "day2-rag-eval"))
+import labkit
+labkit.use_day("day2-rag-eval")
 from common import golden_for_rows, load_config, load_golden, load_rows
 from eval import evaluate
 
+# --- НАСТРОЙКИ ---
+COLLECTION = "chunks_openai"   # снимок, загруженный load.py
+GOLDEN_PATH = None             # None — стандартный golden.jsonl
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("collection", nargs="?", default="chunks_openai")
-    ap.add_argument("--golden")
-    a = ap.parse_args()
-    cfg, rows = load_config(a.collection), load_rows(a.collection)
-    golden = golden_for_rows(load_golden(a.golden), rows, require_all=True)
+    cfg, rows = load_config(COLLECTION), load_rows(COLLECTION)
+    golden = golden_for_rows(load_golden(GOLDEN_PATH), rows, require_all=True)
     from embed import Embedder
     from retrievers import Store
     from pgstore import PgStore
@@ -361,7 +374,7 @@ def main() -> None:
         subset = golden_for_rows(golden, subset_rows)
         if not subset:
             continue
-        chroma = Store(a.collection, embedder, tenant_id=tenant)
+        chroma = Store(COLLECTION, embedder, tenant_id=tenant)
         pg = PgStore(tenant, embedder)
         try:
             if pg.snapshot_config() != cfg:
