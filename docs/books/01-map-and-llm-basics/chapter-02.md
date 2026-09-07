@@ -63,7 +63,8 @@ cd day1-llm-basics
 export OPENROUTER_API_KEY="sk-or-..."
 export LLM_MODEL="anthropic/claude-sonnet-4.6"
 # прокси нужен только из РФ; убери, если запускаешь там, где OpenRouter доступен напрямую
-export HTTPS_PROXY="socks5://192.168.0.106:1080"
+# socks5h, а не socks5: имена резолвит прокси, а не локальный DNS провайдера
+export HTTPS_PROXY="socks5h://192.168.0.106:1080"
 export https_proxy="$HTTPS_PROXY"
 ```
 
@@ -413,7 +414,8 @@ print(answer.choices[0].message.content)
 
 ## Если не получилось
 
-- **`403` от OpenRouter** — прокси не применился. Проверь `echo $HTTPS_PROXY`, что LXC 106 жив (`curl --socks5 192.168.0.106:1080 https://openrouter.ai/api/v1/models -o /dev/null -w '%{http_code}'`), и что стоит `httpx[socks]`, иначе создание SOCKS-транспорта завершается ошибкой отсутствующей зависимости.
+- **`403` от OpenRouter** — прокси не применился. Проверь `echo $HTTPS_PROXY`, что LXC 106 жив (`curl --proxy socks5h://192.168.0.106:1080 https://openrouter.ai/api/v1/models -o /dev/null -w '%{http_code}'`), и что стоит `httpx[socks]`, иначе создание SOCKS-транспорта завершается ошибкой отсутствующей зависимости.
+- **`curl: (97) Can't complete SOCKS5 connection … (5)` или код `000`** — в `HTTPS_PROXY` стоит `socks5://` без `h`. Тогда curl резолвит `openrouter.ai` через локальный DNS, а резолвер провайдера отдаёт для этого имени другой адрес, до которого прокси в Казахстане не достучится. С `socks5h://` имя резолвит сам прокси. Python-скрипты дня этой ошибки не покажут: httpx всегда передаёт прокси имя хоста, поэтому расхождение видно только в curl.
 - **`402 Payment Required`** — кончился баланс OpenRouter; пополни или переключись на бесплатную модель (в id есть `:free`), понимая, что у них лимиты и очередь.
 - **`400` на `response_format`** — модель не поддерживает json_schema; скрипт сам уходит на запасной путь. Хочешь настоящий json_schema — смени модель.
 - **`ValidationError`** в шаге 4 — модель вернула JSON не по схеме или обернула в текст. Посмотри `raw`, добавь в системный промпт «без markdown» (уже есть) или сделай второй запрос с текстом ошибки — это и есть ретрай с валидацией.
