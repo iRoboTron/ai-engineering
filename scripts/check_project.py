@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,14 @@ def main():
         if hashlib.sha256((BOOKS / "vendor" / name).read_bytes()).hexdigest() != meta["sha256"]:
             raise ValueError(f"Vendor checksum mismatch: {name}")
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"])
+    versions = {
+        "index.html": re.search(r"const ASSET_VERSION = '([^']+)'", (BOOKS / "index.html").read_text(encoding="utf-8")).group(1),
+        "reader.html": re.search(r"const ASSET_VERSION = '([^']+)'", (BOOKS / "reader.html").read_text(encoding="utf-8")).group(1),
+        "reader.html script tag": re.search(r'reader-links\.js\?v=([^"]+)"', (BOOKS / "reader.html").read_text(encoding="utf-8")).group(1),
+    }
+    if len(set(versions.values())) != 1:
+        # A stale reader version keeps serving cached .md files after a content deploy.
+        raise ValueError(f"ASSET_VERSION differs between files: {versions}")
     run(["node", "tests/reader-links.test.cjs"])
     run(["bash", "-n", "deploy-pxhome.sh"])
     print("PASS: offline gate (not a provider/GPU/production certification)")
