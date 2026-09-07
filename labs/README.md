@@ -15,7 +15,12 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --require-hashes -r requirements.txt
 python -m pip check
+echo "$(pwd)" > "$(python -c 'import site; print(site.getsitepackages()[0])')/ai_labs.pth"
 ```
+
+Последняя строка делает `labkit.py` (общий модуль настроек, см. ниже) видимым для `import` из любой
+папки `dayN-*` и из VS Code — без неё скрипты не найдут `labkit`. Один `.venv` в корне обслуживает
+все семь дней; отдельного окружения на день нет.
 
 В `requirements.txt` зафиксированы также транзитивные зависимости и SHA256.
 Langfuse закреплён на учебной линии SDK3; это выбор воспроизводимости существующего API,

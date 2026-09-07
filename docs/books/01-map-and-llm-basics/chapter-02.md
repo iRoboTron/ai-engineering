@@ -52,10 +52,18 @@ cd ~/proj/ai-labs
 git init -q
 python3 -m venv .venv && source .venv/bin/activate
 python -m pip install --require-hashes -r requirements.txt
+# Делает labkit.py видимым для import из любой папки дня и из VS Code — без этой строки
+# `import labkit` работает только если явно возиться с sys.path в каждом файле.
+echo "$(pwd)" > "$(python -c 'import site; print(site.getsitepackages()[0])')/ai_labs.pth"
 cd day1-llm-basics
 ```
 
 Установщик копирует готовые исходники, публичные fixtures и безопасный .gitignore: .env, .local/, corpus/, chroma/, out/ и локальные виртуальные окружения не публикуются. Не заменяй существующий .gitignore вслепую. Все команды Python дня 1 выполняй из day1-llm-basics; ниже разбирается уже установленный код.
+
+Строка с `ai_labs.pth` — разовая настройка окружения, а не часть кода лабы: Python при старте читает файлы
+`*.pth` в `site-packages` интерпретатора и добавляет перечисленные в них пути в `sys.path`. Так `import labkit`
+работает откуда угодно — из терминала, из VS Code, из отладчика — без явного `sys.path.insert` в каждом
+скрипте. Если создашь venv заново, повтори эту строку.
 
 Переменные окружения — в файле `~/proj/ai-labs/.env` (он в `.gitignore`). Содержимое:
 
