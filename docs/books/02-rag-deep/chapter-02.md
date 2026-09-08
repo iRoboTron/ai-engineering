@@ -311,17 +311,24 @@ print(f"размерность вектора: {config['dimension']}")
 # (углу между векторами), а не по умолчанию (L2): для нормализованных эмбеддингов порядок результатов
 # обычно совпадает, но метрика должна быть задана явно, а не оставлена на умолчание провайдера.
 # %%
+print(f"создаю папку снимка: {dest}")
 dest.mkdir(parents=True, exist_ok=False)
 import chromadb
+print(f"подключаюсь к Chroma (PersistentClient): {dest / 'chroma'}")
 client = chromadb.PersistentClient(path=str(dest / "chroma"))     # локальная векторная база, файлы на диске
 col = client.create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
-for s in range(0, len(rows), 500):                         # пачками, чтобы не упереться в лимит одного add()
+print(f"коллекция «{COLLECTION}» создана, метрика hnsw:space=cosine")
+n_batches = (len(rows) + 499) // 500
+for i, s in enumerate(range(0, len(rows), 500), start=1):  # пачками, чтобы не упереться в лимит одного add()
     batch = rows[s:s + 500]
     col.add(ids=[r["id"] for r in batch], documents=[r["text"] for r in batch],
             embeddings=vectors[s:s + 500],
             metadatas=[{k: v for k, v in r.items() if k not in {"id", "text"}} for r in batch])
+    print(f"  батч {i}/{n_batches}: чанки {s}–{s + len(batch) - 1} записаны ({len(batch)} шт., всего в коллекции {col.count()})")
 (dest / "chunks.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+print(f"chunks.jsonl записан: {len(rows)} строк ({(dest / 'chunks.jsonl').stat().st_size} байт)")
 (dest / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"config.json записан: {config}")
 print(f"снимок {COLLECTION}: документов {len(tenants)}, чанков {col.count()}, dim={config['dimension']}")
 ```
 
