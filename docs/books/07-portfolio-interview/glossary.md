@@ -180,7 +180,7 @@ flowchart LR
 **System design interview** — разбор архитектуры системы по требованиям и ограничениям за 45 минут; оценивают способ мышления и trade-off. Главы 1–3.
 
 ```mermaid
-flowchart LR
+flowchart TD
     REQ["Требования и\nограничения, 2 мин"] --> DATA["Данные и\nиндексация"]
     DATA --> SEARCH["Поиск"]
     SEARCH --> GEN["Генерация"]
@@ -229,7 +229,7 @@ flowchart TD
 **Кейс продукта (case study)** — структурированный рассказ о проекте: контекст, архитектура, решения с trade-off, инцидент, цифры, что дальше. Главы 1–2.
 
 ```mermaid
-flowchart LR
+flowchart TD
     CTX["Контекст:\nдля кого и зачем"] --> ARCH["Архитектура"]
     ARCH --> DEC["Решения\nс trade-off"]
     DEC --> INC["Инцидент и фикс"]

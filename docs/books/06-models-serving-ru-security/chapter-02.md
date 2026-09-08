@@ -7,7 +7,7 @@
 ## Карта лабы
 
 ```mermaid
-flowchart LR
+flowchart TD
     V["vram.ipynb\nвеса + KV-cache"] --> RES["results.md"]
     O["Ollama на GPU-машине\nQ4_K_M и Q8_0"] --> B["bench_ollama.ipynb\ntok/s, TTFT, ollama ps"]
     B --> RES

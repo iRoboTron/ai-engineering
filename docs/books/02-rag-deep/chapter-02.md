@@ -7,7 +7,7 @@
 ## Карта лабы
 
 ```mermaid
-flowchart LR
+flowchart TD
     C["corpus/\nдокументы ksm или книги"] --> IDX["index.ipynb\nчанки 500/50 → эмбеддинги"]
     IDX --> CH["chunks.jsonl"]
     IDX --> VS["Chroma (локальная)\ncosine"]

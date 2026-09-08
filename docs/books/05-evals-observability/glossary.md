@@ -198,7 +198,7 @@ flowchart LR
 **LLM-as-judge** — использование модели для оценки ответов по рубрике; требует structured output, temperature 0, калибровки и знания смещений. Главы 1–3.
 
 ```mermaid
-flowchart LR
+flowchart TD
     Q["Вопрос + ответ + эталон"] --> RUB["Рубрика: правила\nоценки 0/1/2"]
     RUB --> J["Судья: structured output,\ntemperature=0"]
     J --> V["Оценка + обоснование\nв одно предложение"]

@@ -7,20 +7,12 @@
 ## Карта лабы
 
 ```mermaid
-flowchart LR
+flowchart TD
     HH["hh.ru\n20 вакансий"] --> VAC["career/vacancies-2026-09.md\nтоп-10 требований"]
     HH --> TXT["3 текста вакансий\nai-labs/data/vacancies/*.txt"]
-    CL["client.py\nOpenRouter через socks5"] --> S1["01 usage, temperature\nтокены RU/EN"]
-    CL --> S2["02 structured output\nPydantic + json_schema"]
-    CL --> S3["03 streaming\nTTFT, tok/s"]
-    CL --> S4["04 стоимость\nпрайс из /models"]
-    CL --> S5["05 ретраи\nbackoff + джиттер"]
-    TXT --> S2
-    S1 --> RES["results.md\nчисла и выводы"]
-    S2 --> RES
-    S3 --> RES
-    S4 --> RES
-    S5 --> RES
+    CL["client.py\nOpenRouter через socks5"] --> NB["5 ноутбуков 01–05\nusage · structured · streaming · стоимость · ретраи"]
+    TXT --> NB
+    NB --> RES["results.md\nчисла и выводы"]
     VAC --> CV["Резюме v1\nна hh.ru"]
     RES --> CV
 
@@ -28,11 +20,7 @@ flowchart LR
     style VAC fill:#7d6608,color:#fff
     style TXT fill:#7d6608,color:#fff
     style CL fill:#4a235a,color:#fff
-    style S1 fill:#1a5276,color:#fff
-    style S2 fill:#1a5276,color:#fff
-    style S3 fill:#1a5276,color:#fff
-    style S4 fill:#1a5276,color:#fff
-    style S5 fill:#1a5276,color:#fff
+    style NB fill:#1a5276,color:#fff
     style RES fill:#1e8449,color:#fff
     style CV fill:#1e8449,color:#fff
 ```

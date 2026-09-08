@@ -7,15 +7,12 @@
 ## Карта лабы
 
 ```mermaid
-flowchart LR
+flowchart TD
     Q["python agent.py\n«вопрос»"] --> GR["StateGraph\nllm → guard → tools"]
-    GR --> T1["search_docs\nгибрид дня 2 (Chroma)"]
-    GR --> T2["memory_search\nлокальная память / opt-in API"]
-    GR --> T3["save_note\nзапись после interrupt"]
-    T2 --> MEM["учебные заметки\n.local/memory.json"]
-    T3 --> MEM
+    GR --> TOOLS["ToolNode\nsearch_docs · memory_search · save_note"]
     GR --> CP["MemorySaver\nthread_id"]
     GR --> TR["Трейс\nшаги, токены, $"]
+    TOOLS --> MEM["учебные заметки\n.local/memory.json"]
     TR --> RES["results.md"]
     MCP["mcp_memory_server.py\nFastMCP, stdio"] --> MEM
     MCP -. langchain-mcp-adapters .-> GR2["agent_mcp.ipynb\nтот же граф"]
@@ -24,9 +21,7 @@ flowchart LR
     style Q fill:#2d2d2d,color:#fff
     style GR fill:#1a5276,color:#fff
     style GR2 fill:#1a5276,color:#fff
-    style T1 fill:#1a5276,color:#fff
-    style T2 fill:#1a5276,color:#fff
-    style T3 fill:#6e2f1a,color:#fff
+    style TOOLS fill:#1a5276,color:#fff
     style MEM fill:#7d6608,color:#fff
     style CP fill:#7d6608,color:#fff
     style TR fill:#1a5276,color:#fff

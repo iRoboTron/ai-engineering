@@ -6,7 +6,22 @@
 
 ## Что такое evals и почему они разные
 
-**Evals** — систематическая оценка качества LLM-системы на наборе примеров с известным ожиданием. Три оси, по которым их различают:
+> **Evals** — систематическая оценка качества LLM-системы на наборе примеров с известным ожиданием.
+
+```mermaid
+flowchart TD
+    E["Evals"] --> OFF["Офлайн: перед релизом,\nна golden-наборе"]
+    E --> ON["Онлайн: на проде,\nвыборка трафика"]
+    E --> DET["Детерминированные:\ncode-checks, без LLM"]
+    E --> MOD["Модельные:\nLLM-судья, RAGAS"]
+    style E fill:#2d2d2d,color:#fff
+    style OFF fill:#1a5276,color:#fff
+    style ON fill:#1a5276,color:#fff
+    style DET fill:#1e8449,color:#fff
+    style MOD fill:#4a235a,color:#fff
+```
+
+Три оси, по которым их различают:
 
 - **Что оцениваем**: поиск (нашли ли нужное — дни 2–3), генерацию (правильно ли, по контексту ли, полно ли ответили), систему целиком (решена ли задача пользователя), агента (результат, траектория, стоимость).
 - **Как оцениваем**: детерминированные проверки кодом (подстрока, схема JSON, regex, recall@k) — дёшево, воспроизводимо, узко; модель-судья (LLM-as-judge) — гибко, дорого, шумно; человек — эталон, медленно.
@@ -59,7 +74,20 @@ RAGAS — библиотека метрик для RAG, где судья — м
 
 Что смотреть на дашборде: стоимость на tenant и на запрос, латентность по шагам и p95, доля ошибок по типам, доля «нет ответа», тренд оценок по дням. **PII и секреты**: промпты, ответы, аргументы и exception messages могут содержать персональные данные и API-ключи. По умолчанию отключай автозахват input/output, отправляй только allowlist метрик; любые тексты требуют отдельного одобрения, сроков хранения и доступа. Regex телефонов/email не охватывает все ПДн; self-hosting сам по себе не подтверждает соответствие 152-ФЗ.
 
-**Langfuse** — open source, self-hosted через Docker Compose (v3: Postgres для метаданных, ClickHouse для трейсов, Redis, MinIO), Python SDK с декоратором `@observe`, интеграции с OpenAI SDK и LangChain, датасеты, оценки, судьи. Альтернативы: Arize Phoenix (open source, OpenTelemetry), LangSmith (облако LangChain, из РФ неудобно), OpenLLMetry/OpenTelemetry GenAI-конвенции для тех, у кого уже есть Tempo или Jaeger. У тебя есть Prometheus и Grafana из книги 38 — метрики стоимости и латентности логично отдать туда, содержимое трейсов — в Langfuse.
+> **Langfuse** — open source платформа наблюдаемости LLM: трейсы, генерации, оценки, датасеты, версии промптов; self-hosted через Docker Compose (v3: Postgres для метаданных, ClickHouse для трейсов, Redis, MinIO), Python SDK с декоратором `@observe`, интеграции с OpenAI SDK и LangChain.
+
+```mermaid
+flowchart LR
+    APP["Твоё приложение"] --> SDK["Langfuse SDK\n(@observe)"]
+    SDK --> LF["Langfuse:\nтрейсы, оценки, датасеты"]
+    LF --> UI["UI: сравнение\nпрогонов, тренды"]
+    style APP fill:#2d2d2d,color:#fff
+    style SDK fill:#1a5276,color:#fff
+    style LF fill:#7d6608,color:#fff
+    style UI fill:#1e8449,color:#fff
+```
+
+Альтернативы: Arize Phoenix (open source, OpenTelemetry), LangSmith (облако LangChain, из РФ неудобно), OpenLLMetry/OpenTelemetry GenAI-конвенции для тех, у кого уже есть Tempo или Jaeger. У тебя есть Prometheus и Grafana из книги 38 — метрики стоимости и латентности логично отдать туда, содержимое трейсов — в Langfuse.
 
 ## Дрейф: когда стало хуже, а никто не менял код
 

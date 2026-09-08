@@ -7,7 +7,7 @@
 ## Карта лабы
 
 ```mermaid
-flowchart LR
+flowchart TD
     CH["Chroma дня 2\nchunks_openai"] --> LD["load.ipynb\nэкспорт векторов"]
     LD --> PG["PostgreSQL 17\npgvector, порт 5433"]
     SCH["schema.sql\nvector + tsvector\nHNSW + GIN + RLS"] --> PG

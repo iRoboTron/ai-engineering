@@ -7,7 +7,7 @@
 ## Карта лабы
 
 ```mermaid
-flowchart LR
+flowchart TD
     LF["Langfuse\ndocker compose\npxhome или локально"] --> KEYS["Ключи проекта\nLANGFUSE_*"]
     G["golden.jsonl дня 2\n+ reference для 10"] --> DS["experiment.ipynb\nдатасет golden-rag-v1"]
     DS --> R1["прогон dense"]

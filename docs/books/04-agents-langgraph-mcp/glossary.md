@@ -148,7 +148,7 @@ flowchart LR
 **interrupt()** — функция LangGraph, приостанавливающая граф внутри узла с сохранением состояния; возвращает решение при возобновлении. Лаба, шаг 2.
 
 ```mermaid
-flowchart LR
+flowchart TD
     NODE["Узел графа\nвызывает interrupt(data)"] --> PAUSE["Выполнение\nостановлено"]
     PAUSE --> SAVE["Состояние сохранено\nчерез checkpointer"]
     SAVE --> RESUME["Command(resume=X)"]
@@ -180,7 +180,7 @@ flowchart LR
 **LangGraph** — фреймворк оркестрации агентов на графе состояний: узлы, рёбра, редьюсеры, checkpointer, interrupt, streaming. Главы 1–3.
 
 ```mermaid
-flowchart LR
+flowchart TD
     S["StateGraph:\nтипизированное состояние"] --> N["Узлы: функции,\nменяющие состояние"]
     N --> E["Рёбра: обычные\nи условные"]
     E --> C["compile(checkpointer)"]
@@ -259,7 +259,7 @@ flowchart LR
 **StateGraph** — класс LangGraph для построения графа с типизированным состоянием: `add_node`, `add_edge`, `add_conditional_edges`, `compile`. Лаба, шаг 2.
 
 ```mermaid
-flowchart LR
+flowchart TD
     DEF["class AgentState(TypedDict): …"] --> SG["StateGraph(AgentState)"]
     SG --> AN["add_node('llm', fn)\nadd_node('tools', fn)"]
     AN --> AE["add_conditional_edges(...)"]
@@ -320,7 +320,7 @@ flowchart LR
 **Trajectory (траектория)** — последовательность вызовов инструментов агента; оценивается вместе с результатом и стоимостью. Глава 3.
 
 ```mermaid
-flowchart LR
+flowchart TD
     C1["search_docs('порт')"] --> C2["memory_search('Ollama')"]
     C2 --> C3["save_note(...)"]
     C1 -.-> T["Траектория =\nвся последовательность"]
