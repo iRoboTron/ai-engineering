@@ -12,7 +12,7 @@ flowchart TD
     IDX --> CH["chunks.jsonl"]
     IDX --> VS["Chroma (локальная)\ncosine"]
     CH --> BM["BM25\nсноуболл-стемминг"]
-    G["golden.jsonl\n12 вопросов"] --> EV["eval.py"]
+    G["golden.jsonl\n12 вопросов"] --> EV["eval.ipynb"]
     VS --> R1["dense"]
     BM --> R2["bm25"]
     R1 --> R3["hybrid RRF"]
@@ -75,11 +75,17 @@ ls ../fixtures/corpus
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/common.py
-"""Общие функции: где лежит снимок индекса, как читать golden-вопросы. Импортируется другими файлами дня."""
+"""Общие функции: где лежит снимок индекса, как читать golden-вопросы, как считать Hit@k/MRR.
+Импортируется другими файлами дня и днём 3 (eval_pg.py), поэтому остаётся обычным модулем, не ноутбуком."""
 import hashlib
 import json
+import math
 import re
+import time
 from pathlib import Path
+from statistics import mean, median
+
+KS = (1, 3, 5)
 
 ROOT = Path(__file__).resolve().parent          # папка day2-rag-eval, не зависит от того, откуда запущен скрипт
 FIXTURES = ROOT.parent / "fixtures"              # публичные учебные документы курса
@@ -126,6 +132,38 @@ def golden_for_rows(golden: list[dict], rows: list[dict], require_all=False) -> 
     if require_all and missing:
         raise ValueError("golden ссылается на отсутствующие документы: " + ", ".join(sorted(missing)))
     return [g for g in golden if g["doc"] in names]
+
+def is_hit(result: dict, gold: dict) -> bool:
+    """Попадание: тот же файл, что ожидался, и в тексте чанка есть обязательная фраза."""
+    return result["filename"] == gold["doc"] and gold["must"].lower() in result["text"].lower()
+
+def evaluate(name: str, search, golden: list[dict], k_max: int = 5, repeats: int = 3) -> dict:
+    """Прогоняет один ретривер по golden-вопросам: сначала warmup вне таймера, потом repeats честных
+    повторов, из которых считаются медиана/p95 латентности и Hit@k/MRR по первому повтору.
+    Общая для дня 2 (Chroma) и дня 3 (pgvector) — метрики и формат таблицы должны совпадать."""
+    if not golden or repeats < 1 or k_max < max(KS):
+        raise ValueError("нужны вопросы, repeats >= 1 и k_max >= 5")
+    warm_t0 = time.perf_counter()
+    for g in golden:
+        search(g["q"], k_max)  # модель, соединения и query-cache вне steady-state таймера
+    warmup_ms = 1000 * (time.perf_counter() - warm_t0)
+    ranks, latencies = [], []
+    for repeat in range(repeats):
+        for g in golden:
+            t0 = time.perf_counter()
+            results = search(g["q"], k_max)
+            latencies.append(1000 * (time.perf_counter() - t0))
+            if repeat == 0:
+                ranks.append(next((pos + 1 for pos, r in enumerate(results) if is_hit(r, g)), None))
+    row = {"retriever": name, "latency_ms": median(latencies),
+           "p95_ms": sorted(latencies)[math.ceil(.95 * len(latencies)) - 1],
+           "warmup_ms": warmup_ms, "samples": len(latencies)}
+    # Ключи recall@k оставлены для совместимости адаптеров; здесь это Hit@k, не общий recall.
+    for k in KS:
+        row[f"recall@{k}"] = sum(r is not None and r <= k for r in ranks) / len(ranks)
+    row["mrr"] = mean(1.0 / r if r else 0.0 for r in ranks)  # MRR@k_max
+    row["misses"] = [g["q"] for g, r in zip(golden, ranks) if r is None]
+    return row
 ```
 
 ```python
@@ -417,83 +455,73 @@ class Store:
 
 ```python
 # ~/proj/ai-labs/day2-rag-eval/eval.py
-"""Прогоняет golden-вопросы через четыре ретривера и печатает таблицу Hit@k / MRR / латентность.
-COLLECTION внизу должен совпадать с тем, что ты только что построил в index.py."""
-import math
+# %% [markdown]
+# # День 2 · оценка: четыре ретривера на golden-наборе
+#
+# Как и в `index.ipynb`, код ниже — последовательность ячеек, а не функция: после запуска в
+# переменных `golden`, `embedder`, `store` останутся реальные объекты, которые можно опросить
+# отдельной ячейкой. `COLLECTION` внизу должен совпадать с тем, что ты построил в `index.ipynb`.
+#
+# `evaluate()` и `is_hit()` живут в `common.py`, не здесь: их же импортирует день 3 (`eval_pg.ipynb`),
+# чтобы сравнение Chroma и pgvector было по одной и той же функции, а не по двум похожим копиям.
+# %%
 import time
-from statistics import mean, median
 
 import labkit                          # noqa: F401  подключает .env
-from common import golden_for_rows, load_config, load_golden, load_rows
+from common import evaluate, golden_for_rows, load_config, load_golden, load_rows
 
 # --- НАСТРОЙКИ ---
-COLLECTION = "chunks_openai"           # тот же снимок, что в index.py
+COLLECTION = "chunks_openai"           # тот же снимок, что в index.ipynb
 GOLDEN_PATH = None                     # None — стандартный fixtures/golden.jsonl; можно указать свой файл
 REPEATS = 3                            # сколько раз повторить прогон для честной медианы латентности
 
-KS = (1, 3, 5)
-
-def is_hit(result: dict, gold: dict) -> bool:
-    """Попадание: тот же файл, что ожидался, и в тексте чанка есть обязательная фраза."""
-    return result["filename"] == gold["doc"] and gold["must"].lower() in result["text"].lower()
-
-def evaluate(name: str, search, golden: list[dict], k_max: int = 5, repeats: int = 3) -> dict:
-    if not golden or repeats < 1 or k_max < max(KS):
-        raise ValueError("нужны вопросы, repeats >= 1 и k_max >= 5")
-    warm_t0 = time.perf_counter()
-    for g in golden:
-        search(g["q"], k_max)  # модель, соединения и query-cache вне steady-state таймера
-    warmup_ms = 1000 * (time.perf_counter() - warm_t0)
-    ranks, latencies = [], []
-    for repeat in range(repeats):
-        for g in golden:
-            t0 = time.perf_counter()
-            results = search(g["q"], k_max)
-            latencies.append(1000 * (time.perf_counter() - t0))
-            if repeat == 0:
-                ranks.append(next((pos + 1 for pos, r in enumerate(results) if is_hit(r, g)), None))
-    row = {"retriever": name, "latency_ms": median(latencies),
-           "p95_ms": sorted(latencies)[math.ceil(.95 * len(latencies)) - 1],
-           "warmup_ms": warmup_ms, "samples": len(latencies)}
-    # Ключи recall@k оставлены для совместимости адаптеров; здесь это Hit@k, не общий recall.
-    for k in KS:
-        row[f"recall@{k}"] = sum(r is not None and r <= k for r in ranks) / len(ranks)
-    row["mrr"] = mean(1.0 / r if r else 0.0 for r in ranks)  # MRR@k_max
-    row["misses"] = [g["q"] for g, r in zip(golden, ranks) if r is None]
-    return row
-
-def main() -> None:
-    cfg = load_config(COLLECTION)
-    golden = golden_for_rows(load_golden(GOLDEN_PATH), load_rows(COLLECTION), require_all=True)
-    from embed import Embedder
-    from retrievers import Store
-    embedder = Embedder(cfg["embedder"], cfg["model"])
-    t0 = time.perf_counter()
-    for g in golden:
-        embedder.embed_query(g["q"])
-    print(f"query embeddings (один раз, вне поиска): {time.perf_counter() - t0:.2f} s")
-    store = Store(COLLECTION, embedder)
-    print(f"snapshot={cfg['dataset_hash']} questions={len(golden)} repeats={REPEATS}")
-    print("| retriever | Hit@1 | Hit@3 | Hit@5 | MRR@5 | p50 ms | p95 ms | warmup ms |")
-    print("|---|---|---|---|---|---|---|---|")
-    for name, fn in (("dense", store.dense), ("bm25", store.bm25_search), ("hybrid RRF", store.hybrid), ("hybrid + rerank", store.hybrid_rerank)):
-        r = evaluate(name, fn, golden, repeats=REPEATS)
-        print(f"| {name} | {r['recall@1']:.2f} | {r['recall@3']:.2f} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} | {r['warmup_ms']:.0f} |")
-        if r["misses"]:
-            print("Промахи:", " | ".join(r["misses"][:6]))
-
-if __name__ == "__main__":
-    main()
+# %% [markdown]
+# ## Hit@k, а не общий recall
+#
+# Попадание засчитывается, если нужный документ нашёлся в топ-k *и* в тексте чанка есть обязательная
+# фраза (`must` из golden-набора) — так отсекаются случайные совпадения по файлу без реального ответа
+# внутри. Это Hit@k: доля вопросов с хотя бы одним попаданием, а не полнота по всем релевантным
+# фрагментам сразу (общий recall при нескольких верных чанках на вопрос).
+#
+# Замер честный: первый прогон по каждому вопросу — `warmup`, он прогревает модель, соединения и
+# query-cache и не идёт в статистику латентности; дальше вопросы гоняются `REPEATS` раз, и считаются
+# медиана (p50) и p95 — устойчивые к редким выбросам оценки, в отличие от среднего. Всё это — внутри
+# `evaluate()` из `common.py`, здесь только вызов.
+#
+# ## Прогон: golden-вопросы → таблица по четырём ретриверам
+#
+# Загружаем снимок и golden-набор, считаем эмбеддинги вопросов один раз заранее (а не внутри каждого
+# поиска — это отдельная от поиска стоимость), затем гоняем `evaluate()` по очереди для dense, BM25,
+# hybrid RRF и hybrid + rerank из `retrievers.py` дня 2 и печатаем строку таблицы на каждый.
+# %%
+cfg = load_config(COLLECTION)
+golden = golden_for_rows(load_golden(GOLDEN_PATH), load_rows(COLLECTION), require_all=True)
+from embed import Embedder
+from retrievers import Store
+embedder = Embedder(cfg["embedder"], cfg["model"])
+t0 = time.perf_counter()
+for g in golden:
+    embedder.embed_query(g["q"])
+print(f"query embeddings (один раз, вне поиска): {time.perf_counter() - t0:.2f} s")
+store = Store(COLLECTION, embedder)
+print(f"snapshot={cfg['dataset_hash']} questions={len(golden)} repeats={REPEATS}")
+print("| retriever | Hit@1 | Hit@3 | Hit@5 | MRR@5 | p50 ms | p95 ms | warmup ms |")
+print("|---|---|---|---|---|---|---|---|")
+for name, fn in (("dense", store.dense), ("bm25", store.bm25_search), ("hybrid RRF", store.hybrid), ("hybrid + rerank", store.hybrid_rerank)):
+    r = evaluate(name, fn, golden, repeats=REPEATS)
+    print(f"| {name} | {r['recall@1']:.2f} | {r['recall@3']:.2f} | {r['recall@5']:.2f} | {r['mrr']:.2f} | {r['latency_ms']:.1f} | {r['p95_ms']:.1f} | {r['warmup_ms']:.0f} |")
+    if r["misses"]:
+        print("Промахи:", " | ".join(r["misses"][:6]))
 ```
 
-Запуск: `python eval.py` (этот файл остаётся обычным скриптом, не ноутбуком: его импортирует `eval_pg.py` в дне 3, а ноутбук нельзя импортировать как модуль). Первый прогрев с реранкером медленный — качается и загружается модель; это отдельный warmup, не латентность поиска. Таблицу с p50/p95 и числом повторов скопируй в `results.md`. Затем разбери промахи: для каждого вопроса, который не нашёл даже hybrid + rerank, найди `grep -n` фразу в `.local/<collection>/chunks.jsonl` и запиши причину — фраза разрезана границей чанка, документ извлёкся плохо, вопрос сформулирован иначе, чем текст. Три-пять разобранных промахов ценнее ещё одного процента recall.
+Запуск: открой `eval.ipynb` в VS Code и нажми ▶ Run All (сама функция `evaluate`, которую переиспользует день 3, живёт в `common.py` — её можно импортировать, а ноутбук нельзя). Первый прогрев с реранкером медленный — качается и загружается модель; это отдельный warmup, не латентность поиска. Таблицу с p50/p95 и числом повторов скопируй в `results.md`. Затем разбери промахи: для каждого вопроса, который не нашёл даже hybrid + rerank, найди `grep -n` фразу в `.local/<collection>/chunks.jsonl` и запиши причину — фраза разрезана границей чанка, документ извлёкся плохо, вопрос сформулирован иначе, чем текст. Три-пять разобранных промахов ценнее ещё одного процента recall.
 
 ## Шаг 7. Второй прогон: контекстная нарезка
 
 Новый снимок не меняет старую коллекцию и её чанки. Один флаг — и это отдельный эксперимент: индексируй с именем документа в начале каждого чанка и сравни.
 
 В `index.ipynb` поставь `COLLECTION = "chunks_openai_ctx"` и `TITLE_PREFIX = True`, сохрани и нажми ▶ Run All.
-В `eval.py` поставь `COLLECTION = "chunks_openai_ctx"`, сохрани и запусти (`python eval.py`).
+В `eval.ipynb` поставь `COLLECTION = "chunks_openai_ctx"`, сохрани и нажми ▶ Run All.
 
 Дописывай строки в `results.md` с пометкой конфигурации. Если корпус — главы книг с говорящими именами файлов, эффект будет заметен на вопросах про «где» и «в какой книге»; на корпусе ksm — проверь.
 
@@ -502,7 +530,7 @@ if __name__ == "__main__":
 Локальная модель против API — главный вопрос для on-prem вакансий. `bge-m3` тяжёлая для CPU, но несколько сотен чанков переживёт за минуты:
 
 В `index.ipynb` поставь `COLLECTION = "chunks_bge"`, `EMBEDDER = "local"`, `MODEL = "BAAI/bge-m3"`, сохрани и нажми ▶ Run All.
-В `eval.py` поставь `COLLECTION = "chunks_bge"`, сохрани и запусти (`python eval.py`).
+В `eval.ipynb` поставь `COLLECTION = "chunks_bge"`, сохрани и нажми ▶ Run All.
 
 Хочешь третью строку — `intfloat/multilingual-e5-large` (префиксы подставятся сами). В отчёт: recall@5 и латентность dense-поиска для каждой модели плюс стоимость индексации API-моделью — это готовое сравнение «облако против локально» для собеседования.
 
@@ -514,7 +542,7 @@ if __name__ == "__main__":
 # День 2 — качество поиска (дата, корпус: public synthetic fixtures v1, чанков: N)
 
 ## Основной прогон (text-embedding-3-small, 500/50)
-<таблица из eval.py>
+<таблица из eval.ipynb>
 
 ## Контекстная нарезка (--title-prefix)
 <таблица>
@@ -552,7 +580,7 @@ if __name__ == "__main__":
 
 - В `../fixtures/golden.jsonl` 12 строк; расширенный набор хранится отдельно, для каждой фраза `must` буквально присутствует в указанном документе (проверено grep).
 - `index.ipynb` отработал: напечатано число чанков и размерность; `.local/<collection>/chunks.jsonl` существует.
-- `eval.py` выдал таблицу для четырёх ретриверов; сравнены Hit@5 и MRR@5, улучшение не предполагается заранее; любое ухудшение разобрано без подгонки holdout.
+- `eval.ipynb` выдал таблицу для четырёх ретриверов; сравнены Hit@5 и MRR@5, улучшение не предполагается заранее; любое ухудшение разобрано без подгонки holdout.
 - В `results.md` есть латентность каждого ретривера в миллисекундах и стоимость индексации API-моделью.
 - Разобраны три-пять промахов с причинами.
 - Есть строка выводов «что идёт в web-agent первым» и строка для резюме с числами.

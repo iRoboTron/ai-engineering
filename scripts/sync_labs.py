@@ -20,8 +20,10 @@ from py_to_ipynb import convert as _py_to_ipynb  # noqa: E402
 # Entry-point scripts the reader runs and reads output from, and that no other lab file
 # imports (`from <module> import ...`) — safe to ship as a notebook instead of a .py file.
 # Files any other script imports (client.py, common.py, embed.py, retrievers.py, tools.py,
-# memory_backend.py, agent.py, rag_pipeline.py, eval.py, rag_logic.py, pgstore.py, ...) stay
-# .py: a notebook cannot be `import`ed by another script without extra tooling.
+# memory_backend.py, agent.py, rag_pipeline.py, rag_logic.py, pgstore.py, ...) stay
+# .py: a notebook cannot be `import`ed by another script without extra tooling. eval.py's
+# reusable evaluate()/is_hit() moved into common.py for exactly this reason -- day3's
+# eval_pg.py imports evaluate() from common, not from eval.
 NOTEBOOK_ENTRYPOINTS = {
     "day1-llm-basics/01_basics.py",
     "day1-llm-basics/02_structured.py",
@@ -29,6 +31,7 @@ NOTEBOOK_ENTRYPOINTS = {
     "day1-llm-basics/04_cost.py",
     "day1-llm-basics/05_retry.py",
     "day2-rag-eval/index.py",
+    "day2-rag-eval/eval.py",
     "day3-pgvector/load.py",
     "day3-pgvector/eval_pg.py",
     "day4-agent/agent_mcp.py",

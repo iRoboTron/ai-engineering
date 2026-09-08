@@ -375,8 +375,7 @@ import time
 
 import labkit
 labkit.use_day("day2-rag-eval")
-from common import golden_for_rows, load_config, load_golden, load_rows
-from eval import evaluate
+from common import evaluate, golden_for_rows, load_config, load_golden, load_rows
 
 # --- НАСТРОЙКИ ---
 COLLECTION = "chunks_openai"   # снимок, загруженный load.py

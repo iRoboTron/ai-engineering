@@ -13,7 +13,7 @@
   "day2-rag-eval/embed.py": "docs/books/02-rag-deep/chapter-02.md",
   "day2-rag-eval/index.ipynb": "docs/books/02-rag-deep/chapter-02.md",
   "day2-rag-eval/retrievers.py": "docs/books/02-rag-deep/chapter-02.md",
-  "day2-rag-eval/eval.py": "docs/books/02-rag-deep/chapter-02.md",
+  "day2-rag-eval/eval.ipynb": "docs/books/02-rag-deep/chapter-02.md",
   "day3-pgvector/docker-compose.yml": "docs/books/03-vector-stores-and-ingestion/chapter-02.md",
   "day3-pgvector/schema.sql": "docs/books/03-vector-stores-and-ingestion/chapter-02.md",
   "day3-pgvector/load.ipynb": "docs/books/03-vector-stores-and-ingestion/chapter-02.md",

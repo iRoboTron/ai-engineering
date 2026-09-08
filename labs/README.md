@@ -35,7 +35,7 @@ echo "$(pwd)" > "$(python -c 'import site; print(site.getsitepackages()[0])')/ai
 Часть файлов — Jupyter-ноутбуки: их и нужно запускать каждый день, кнопкой ▶ Run All в VS Code
 (нужно расширение **Jupyter**, ядро — тот же `.venv`). Остальные остаются обычными `.py` — это
 модули, которые импортируют другие файлы (`client.py`, `common.py`, `embed.py`, `retrievers.py`,
-`tools.py`, `memory_backend.py`, `agent.py`, `rag_pipeline.py`, `eval.py`, `rag_logic.py`,
+`tools.py`, `memory_backend.py`, `agent.py`, `rag_pipeline.py`, `rag_logic.py`,
 `pgstore.py`, `mcp_memory_server.py` и подобные): ноутбук нельзя `import`-нуть как модуль без
 отдельных инструментов, поэтому код, который переиспользуется, живёт в `.py`, а код, который ты
 читаешь и запускаешь целиком одним днём, — в `.ipynb`. Список ноутбуков и правило конвертации —

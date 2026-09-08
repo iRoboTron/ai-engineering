@@ -89,7 +89,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     U["Реальные вопросы\nпользователей"] --> G["golden.jsonl:\nвопрос → документ → фраза"]
-    G --> E["eval.py прогоняет\nчерез каждый ретривер"]
+    G --> E["eval.ipynb прогоняет\nчерез каждый ретривер"]
     E --> R["Hit@k, MRR:\nодно и то же мерило\nдо и после правок"]
     style U fill:#2d2d2d,color:#fff
     style G fill:#7d6608,color:#fff
